@@ -231,19 +231,121 @@ button {
   min-width: 0;
 }
 
-.session-item-agent {
-  flex-shrink: 0;
-}
-
 .session-item-cwd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.session-item-cwd::before {
-  content: '·';
-  margin-right: 6px;
+/* ============================================================
+   Session filters (search + agent/status selects)
+   ============================================================ */
+.session-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 2px 10px;
+}
+
+.session-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.session-search-icon {
+  position: absolute;
+  left: 10px;
+  display: inline-flex;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.session-search-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.session-search input {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 32px 7px 33px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.session-search input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.session-search input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.session-search-clear {
+  position: absolute;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.session-search-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.session-search-clear svg {
+  width: 13px;
+  height: 13px;
+}
+
+.session-filter-row {
+  display: flex;
+  gap: 8px;
+}
+
+.session-filter-select {
+  flex: 1;
+  min-width: 0;
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.session-filter-select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+/* ============================================================
+   Session groups (grouped by coding_agent)
+   ============================================================ */
+.session-group-title {
+  margin: 10px 10px 2px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   color: var(--text-secondary);
 }
 

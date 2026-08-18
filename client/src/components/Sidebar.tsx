@@ -1,4 +1,7 @@
+import { useState } from 'react';
+import { DEFAULT_FILTERS, filterSessions } from '../sessionFilters';
 import type { SessionRecord } from '../types';
+import { SessionFiltersBar } from './SessionFiltersBar';
 import { SessionList } from './SessionList';
 
 export function Sidebar({
@@ -14,6 +17,14 @@ export function Sidebar({
   onSelect: (sessionId: string) => void;
   onNewSession: () => void;
 }) {
+  const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  const filtered = filterSessions(sessions, filters);
+  // Different empty message depending on whether there are sessions at all.
+  const emptyLabel =
+    sessions.length > 0 && filtered.length === 0
+      ? 'No sessions match your filters.'
+      : 'No sessions yet.';
+
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -40,7 +51,8 @@ export function Sidebar({
         New session
       </button>
 
-      <SessionList sessions={sessions} selectedId={selectedId} onSelect={onSelect} />
+      <SessionFiltersBar sessions={sessions} filters={filters} onChange={setFilters} />
+      <SessionList sessions={filtered} selectedId={selectedId} onSelect={onSelect} emptyLabel={emptyLabel} />
 
       <footer className="sidebar-footer" role="status">
         <span className={`conn-dot ${connected ? 'is-connected' : ''}`} aria-hidden="true" />

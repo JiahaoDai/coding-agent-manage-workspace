@@ -4,9 +4,9 @@
 
 **Blocked by:** #2 — Streaming conversation: text + tool calls + thinking (collapsed)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Each session shows a status badge (running / completed / error / cancelled).
-- [ ] Filtering by agent works.
-- [ ] Filtering by status works.
-- [ ] Keyword search by name or directory works.
+- [x] Each session shows a status badge (running / completed / error / cancelled).
+- [x] Filtering by agent works.
+- [x] Filtering by status works.
+- [x] Keyword search by name or directory works.
