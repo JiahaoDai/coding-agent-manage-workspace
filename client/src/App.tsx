@@ -31,6 +31,15 @@ export function App() {
   // modal shows the first; the rest queue behind it.
   const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
 
+  /**
+   * A request id is only unique within a session (agents reuse per-turn
+   * counters), so every queue operation is scoped by session + request id. A
+   * response for one session must never drop or dedupe another session's
+   * colliding request.
+   */
+  const sameRequest = (a: { session_id: string; request_id: string }, b: { session_id: string; request_id: string }) =>
+    a.session_id === b.session_id && a.request_id === b.request_id;
+
   useEffect(() => {
     void listAgents().then(setAgents);
     void listSessions().then(setSessions);
@@ -73,16 +82,17 @@ export function App() {
         }
         case 'permission_request':
           setPermissionQueue((prev) =>
-            prev.some((p) => p.request_id === event.request_id)
+            prev.some((p) => sameRequest(p, event))
               ? prev
               : [...prev, { session_id: event.session_id, request_id: event.request_id, tool_name: event.tool_name, input: event.input }],
           );
           break;
         case 'permission_response':
           // The request is resolved (by this tab or another); drop it so the
-          // modal doesn't linger. Filtering by id is idempotent for the tab
-          // that just answered optimistically.
-          setPermissionQueue((prev) => prev.filter((p) => p.request_id !== event.request_id));
+          // modal doesn't linger. Scoped to the same session: another session's
+          // request that happens to share the id must stay queued. Filtering is
+          // idempotent for the tab that just answered optimistically.
+          setPermissionQueue((prev) => prev.filter((p) => !sameRequest(p, event)));
           break;
       }
     };
@@ -106,7 +116,7 @@ export function App() {
   async function handlePermissionDecision(request: PermissionRequest, decision: 'allow' | 'deny') {
     // Drop optimistically; a server-side failure means the request is already
     // gone (answered elsewhere / session removed), so there is nothing to retry.
-    setPermissionQueue((prev) => prev.filter((p) => p.request_id !== request.request_id));
+    setPermissionQueue((prev) => prev.filter((p) => !sameRequest(p, request)));
     try {
       await respondPermission(request.session_id, request.request_id, decision);
     } catch (err) {

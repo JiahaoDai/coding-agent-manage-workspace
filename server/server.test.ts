@@ -14,12 +14,19 @@ import type { PromptHandlers } from '../shared/adapter';
 import type { ServerEvent } from '../shared/events';
 import type { SessionRecord, SessionStatus } from '../shared/session';
 
+/** Context a script sees for the prompt it is driving. */
+interface PromptContext {
+  real_session_id: string;
+  cwd: string;
+  input: string;
+}
+
 /** In-process fake adapter that records calls and returns deterministic ids. */
 class ScriptedAdapter extends BaseAdapter {
   readonly created: string[] = [];
   promptCalls: Array<{ real_session_id: string; cwd: string; input: string }> = [];
   /** If set, run this script when prompt is called (drives the stream handlers). */
-  promptScript?: (handlers: PromptHandlers) => void | Promise<void>;
+  promptScript?: (handlers: PromptHandlers, ctx: PromptContext) => void | Promise<void>;
   /** If set, prompt rejects with this message instead of running the script. */
   promptError?: string;
   /** Decisions the adapter saw from onPermissionRequest, in call order. */
@@ -29,6 +36,10 @@ class ScriptedAdapter extends BaseAdapter {
     input: unknown;
     decision: 'allow' | 'deny';
   }> = [];
+
+  /** High-water mark of prompts in flight — proves turns overlap. */
+  maxConcurrentPrompts = 0;
+  private activePrompts = 0;
 
   async createSession(cwd: string): Promise<{ real_session_id: string }> {
     this.created.push(cwd);
@@ -42,8 +53,14 @@ class ScriptedAdapter extends BaseAdapter {
     handlers: PromptHandlers,
   ): Promise<void> {
     this.promptCalls.push({ real_session_id, cwd, input });
-    if (this.promptError) throw new Error(this.promptError);
-    if (this.promptScript) await this.promptScript(handlers);
+    this.activePrompts += 1;
+    this.maxConcurrentPrompts = Math.max(this.maxConcurrentPrompts, this.activePrompts);
+    try {
+      if (this.promptError) throw new Error(this.promptError);
+      if (this.promptScript) await this.promptScript(handlers, { real_session_id, cwd, input });
+    } finally {
+      this.activePrompts -= 1;
+    }
   }
 }
 
@@ -602,6 +619,229 @@ describe('interactive permission confirmation (ticket #3)', () => {
       expect(ok.status).toBe(200);
 
       await sendPromise;
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+});
+
+describe('concurrent sessions (ticket #4)', () => {
+  it('runs two sessions concurrently with independent streams and statuses', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      // Stream with pauses so a second prompt starts before the first finishes.
+      fake.promptScript = async (handlers) => {
+        handlers.onTextDelta('delta');
+        await sleep(150);
+        handlers.onTextDelta(' delta2');
+        await sleep(150);
+        handlers.onStatusChange('completed');
+      };
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const a = await createSession(baseUrl, 'A');
+      const b = await createSession(baseUrl, 'B');
+
+      // Fire both turns without awaiting — the route resolves only when the
+      // turn finishes, so awaiting here would serialize them.
+      const pA = post(baseUrl, `/api/sessions/${a.session_id}/message`, { text: 'to A' });
+      const pB = post(baseUrl, `/api/sessions/${b.session_id}/message`, { text: 'to B' });
+
+      const events = await collectEvents(reader, (evs) => {
+        const done = (sid: string) =>
+          evs.some(
+            (e) =>
+              e.type === 'status_change' && e.session_id === sid && e.status === 'completed',
+          );
+        return done(a.session_id) && done(b.session_id);
+      });
+
+      // Both turns overlapped in flight, not serialized.
+      expect(fake.maxConcurrentPrompts).toBeGreaterThanOrEqual(2);
+
+      // Every event is tagged with one of the two sessions — nothing cross-wired.
+      const ids = new Set(events.map((e) => e.session_id));
+      expect([...ids].sort()).toEqual([a.session_id, b.session_id].sort());
+
+      // Each session sees only its own running → completed sequence and text.
+      for (const sid of [a.session_id, b.session_id]) {
+        const own = events.filter((e) => e.session_id === sid);
+        const statuses = own
+          .filter((e): e is Extract<ServerEvent, { type: 'status_change' }> => e.type === 'status_change')
+          .map((e) => e.status);
+        expect(statuses).toEqual(['running', 'completed']);
+        const text = own
+          .filter((e): e is Extract<ServerEvent, { type: 'text_delta' }> => e.type === 'text_delta')
+          .map((e) => e.text)
+          .join('');
+        expect(text).toBe('delta delta2');
+      }
+
+      await Promise.all([pA, pB]);
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('routes permission requests with the same id from two sessions only to their own session', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      // Both sessions ask for the SAME request id — only the session id
+      // distinguishes them, which is exactly the cross-talk the broker must resist.
+      fake.promptScript = async (handlers) => {
+        const decision = await handlers.onPermissionRequest('p-1', 'Bash', { command: 'ls' });
+        fake.permissionDecisions.push({
+          request_id: 'p-1',
+          tool_name: 'Bash',
+          input: { command: 'ls' },
+          decision,
+        });
+        handlers.onStatusChange('completed');
+      };
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const a = await createSession(baseUrl, 'A');
+      const b = await createSession(baseUrl, 'B');
+
+      const pA = post(baseUrl, `/api/sessions/${a.session_id}/message`, { text: 'to A' });
+      const pB = post(baseUrl, `/api/sessions/${b.session_id}/message`, { text: 'to B' });
+
+      // Wait until a permission_request has surfaced for BOTH sessions.
+      const seen = await collectEvents(reader, (evs) => {
+        const prs = evs.filter(
+          (e): e is Extract<ServerEvent, { type: 'permission_request' }> => e.type === 'permission_request',
+        );
+        const ids = new Set(prs.map((p) => p.session_id));
+        return ids.has(a.session_id) && ids.has(b.session_id);
+      });
+      const requests = seen.filter(
+        (e): e is Extract<ServerEvent, { type: 'permission_request' }> => e.type === 'permission_request',
+      );
+      expect(requests).toHaveLength(2);
+      for (const r of requests) {
+        expect(r.request_id).toBe('p-1');
+        expect([a.session_id, b.session_id]).toContain(r.session_id);
+      }
+
+      // Answer A's request through A's endpoint — B must stay untouched.
+      const resA = await post(baseUrl, `/api/sessions/${a.session_id}/permission`, {
+        request_id: 'p-1',
+        decision: 'allow',
+      });
+      expect(resA.status).toBe(200);
+
+      await collectEvents(
+        reader,
+        (evs) =>
+          evs.some(
+            (e) =>
+              e.type === 'status_change' &&
+              e.session_id === a.session_id &&
+              e.status === 'completed',
+          ),
+      );
+
+      // A completed; B is still waiting on its own request.
+      const sessions = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
+      expect(sessions.find((s) => s.session_id === a.session_id)?.status).toBe('completed');
+      expect(sessions.find((s) => s.session_id === b.session_id)?.status).toBe('running');
+
+      // B's request is still answerable via B's endpoint.
+      const resB = await post(baseUrl, `/api/sessions/${b.session_id}/permission`, {
+        request_id: 'p-1',
+        decision: 'deny',
+      });
+      expect(resB.status).toBe(200);
+
+      await collectEvents(
+        reader,
+        (evs) =>
+          evs.some(
+            (e) =>
+              e.type === 'status_change' &&
+              e.session_id === b.session_id &&
+              e.status === 'completed',
+          ),
+      );
+
+      // Each turn saw its own decision, in answer order.
+      expect(fake.permissionDecisions).toEqual([
+        { request_id: 'p-1', tool_name: 'Bash', input: { command: 'ls' }, decision: 'allow' },
+        { request_id: 'p-1', tool_name: 'Bash', input: { command: 'ls' }, decision: 'deny' },
+      ]);
+
+      await Promise.all([pA, pB]);
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('keeps a failing session independent from a concurrent healthy session', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = async (handlers, ctx) => {
+        if (ctx.input === 'boom') throw new Error('A blew up');
+        handlers.onTextDelta('B is fine');
+        handlers.onStatusChange('completed');
+      };
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const a = await createSession(baseUrl, 'A');
+      const b = await createSession(baseUrl, 'B');
+
+      const pA = post(baseUrl, `/api/sessions/${a.session_id}/message`, { text: 'boom' });
+      const pB = post(baseUrl, `/api/sessions/${b.session_id}/message`, { text: 'ok' });
+
+      const events = await collectEvents(reader, (evs) => {
+        const aError = evs.some(
+          (e) =>
+            e.type === 'status_change' && e.session_id === a.session_id && e.status === 'error',
+        );
+        const bDone = evs.some(
+          (e) =>
+            e.type === 'status_change' &&
+            e.session_id === b.session_id &&
+            e.status === 'completed',
+        );
+        return aError && bDone;
+      });
+
+      // A's failure is tagged to A only.
+      const errors = events.filter(
+        (e): e is Extract<ServerEvent, { type: 'error' }> => e.type === 'error',
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0].session_id).toBe(a.session_id);
+      expect(errors[0].message).toContain('A blew up');
+
+      // B's stream and status are untouched by A's failure.
+      const bStatuses = events
+        .filter((e) => e.session_id === b.session_id)
+        .filter((e): e is Extract<ServerEvent, { type: 'status_change' }> => e.type === 'status_change')
+        .map((e) => e.status);
+      expect(bStatuses).toEqual(['running', 'completed']);
+      const bText = events
+        .filter((e) => e.session_id === b.session_id)
+        .filter((e): e is Extract<ServerEvent, { type: 'text_delta' }> => e.type === 'text_delta')
+        .map((e) => e.text);
+      expect(bText).toEqual(['B is fine']);
+
+      await Promise.all([pA, pB]);
       await reader.cancel();
     } finally {
       server.close();

@@ -4,8 +4,8 @@
 
 **Blocked by:** #2 — Streaming conversation: text + tool calls + thinking (collapsed); #3 — Interactive permission confirmation
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Two or more sessions can run concurrently.
-- [ ] Each session's stream and status stay independent (no cross-talk between sessions).
-- [ ] A permission request from one session routes only to that session's window.
+- [x] Two or more sessions can run concurrently.
+- [x] Each session's stream and status stay independent (no cross-talk between sessions).
+- [x] A permission request from one session routes only to that session's window.
