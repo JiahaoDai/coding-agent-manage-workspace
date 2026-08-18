@@ -9,12 +9,14 @@ export function Sidebar({
   connected,
   selectedId,
   onSelect,
+  onDelete,
   onNewSession,
 }: {
   sessions: SessionRecord[];
   connected: boolean;
   selectedId: string | null;
   onSelect: (sessionId: string) => void;
+  onDelete: (sessionId: string) => void;
   onNewSession: () => void;
 }) {
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
@@ -52,7 +54,13 @@ export function Sidebar({
       </button>
 
       <SessionFiltersBar sessions={sessions} filters={filters} onChange={setFilters} />
-      <SessionList sessions={filtered} selectedId={selectedId} onSelect={onSelect} emptyLabel={emptyLabel} />
+      <SessionList
+        sessions={filtered}
+        selectedId={selectedId}
+        onSelect={onSelect}
+        onDelete={onDelete}
+        emptyLabel={emptyLabel}
+      />
 
       <footer className="sidebar-footer" role="status">
         <span className={`conn-dot ${connected ? 'is-connected' : ''}`} aria-hidden="true" />

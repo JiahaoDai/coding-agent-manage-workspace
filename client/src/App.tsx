@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { listAgents, listSessions, respondPermission, sendMessage } from './api';
+import { deleteSession, listAgents, listSessions, respondPermission, sendMessage } from './api';
 import { ConversationView } from './components/ConversationView';
 import { CreateSessionForm } from './components/CreateSessionForm';
 import { EmptyState } from './components/EmptyState';
@@ -19,6 +19,7 @@ import type { AgentId, PermissionRequest, ServerEvent, SessionRecord } from './t
 function addSessionIfAbsent(prev: SessionRecord[], session: SessionRecord): SessionRecord[] {
   return prev.some((s) => s.session_id === session.session_id) ? prev : [session, ...prev];
 }
+
 
 export function App() {
   const [agents, setAgents] = useState<AgentId[]>([]);
@@ -64,6 +65,9 @@ export function App() {
           setSessions((prev) =>
             prev.map((s) => (s.session_id === event.session_id ? { ...s, status: event.status } : s)),
           );
+          break;
+        case 'session_removed':
+          removeSession(event.session_id);
           break;
         case 'text_delta':
         case 'thinking_delta':
@@ -113,6 +117,36 @@ export function App() {
     }
   }
 
+  /** Drop a session everywhere: the list, its conversation, and the selection. */
+  function removeSession(sessionId: string) {
+    setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
+    setConversations((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    setSelectedId((prev) => (prev === sessionId ? null : prev));
+  }
+
+  async function handleDelete(sessionId: string) {
+    try {
+      await deleteSession(sessionId);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setConversations((prev) => ({
+        ...prev,
+        [sessionId]: applyStreamEvent(prev[sessionId] ?? [], {
+          type: 'error',
+          message: `Delete failed: ${detail}`,
+        }),
+      }));
+      return;
+    }
+    // The SSE `session_removed` also arrives and calls removeSession; doing it
+    // here too keeps the UI instant and idempotent.
+    removeSession(sessionId);
+  }
+
   async function handlePermissionDecision(request: PermissionRequest, decision: 'allow' | 'deny') {
     // Drop optimistically; a server-side failure means the request is already
     // gone (answered elsewhere / session removed), so there is nothing to retry.
@@ -144,6 +178,7 @@ export function App() {
         connected={connected}
         selectedId={selectedId}
         onSelect={setSelectedId}
+        onDelete={handleDelete}
         onNewSession={() => {
           setCreating(true);
           setSelectedId(null);

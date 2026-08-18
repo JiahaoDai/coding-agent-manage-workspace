@@ -1,4 +1,4 @@
-import type { AgentId, SessionRecord } from './types';
+import type { AgentId, ReimportableSession, SessionRecord } from './types';
 
 export async function listAgents(): Promise<AgentId[]> {
   const res = await fetch('/api/agents');
@@ -38,6 +38,49 @@ export async function sendMessage(sessionId: string, text: string): Promise<void
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
     throw new Error(body?.error ?? `send failed: ${res.status}`);
   }
+}
+
+/** Soft-delete a session: removes the app's record; the agent's native session stays intact. */
+export async function deleteSession(sessionId: string): Promise<void> {
+  const res = await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `delete failed: ${res.status}`);
+  }
+}
+
+/** Native sessions for a folder+agent that the app is not tracking — re-import candidates. */
+export async function listNativeSessions(
+  cwd: string,
+  agent: AgentId,
+): Promise<ReimportableSession[]> {
+  const res = await fetch(
+    `/api/sessions/native?cwd=${encodeURIComponent(cwd)}&agent=${encodeURIComponent(agent)}`,
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `list native failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** Re-import a native session into the app's list (after a soft delete, or one created outside the app). */
+export async function importSession(input: {
+  cwd: string;
+  agent: AgentId;
+  real_session_id: string;
+  name?: string;
+}): Promise<SessionRecord> {
+  const res = await fetch('/api/sessions/import', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `import failed: ${res.status}`);
+  }
+  return res.json();
 }
 
 /** Answer a pending permission request. The agent's turn only continues after this resolves. */

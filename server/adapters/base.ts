@@ -11,7 +11,7 @@ export abstract class BaseAdapter implements AgentAdapter {
     return { real_session_id };
   }
 
-  async listSessions(): Promise<NativeSession[]> {
+  async listSessions(_cwd: string): Promise<NativeSession[]> {
     return [];
   }
 

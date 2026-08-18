@@ -4,8 +4,8 @@
 
 **Blocked by:** #5 — Session list: filter, search, status badges
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Deleting removes the SQLite record and the session disappears from the list.
-- [ ] The agent's native session is not deleted on soft delete.
-- [ ] A deleted session can be re-imported from the agent's native store.
+- [x] Deleting removes the SQLite record and the session disappears from the list.
+- [x] The agent's native session is not deleted on soft delete.
+- [x] A deleted session can be re-imported from the agent's native store.

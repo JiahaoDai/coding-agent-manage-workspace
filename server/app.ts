@@ -6,7 +6,7 @@ import type { SessionStore } from './db';
 import { PermissionBroker } from './permission';
 import type { SseHub } from './sse';
 import type { PromptHandlers } from '../shared/adapter';
-import type { SessionRecord } from '../shared/session';
+import type { ReimportableSession, SessionRecord } from '../shared/session';
 
 export interface AppDeps {
   store: SessionStore;
@@ -36,6 +36,102 @@ export function createApp(deps: AppDeps): Hono {
     if (!adapter) return c.json({ error: `unknown agent: ${agent}` }, 400);
 
     const { real_session_id } = await adapter.createSession(cwd, { name });
+    const now = Date.now();
+    const session: SessionRecord = {
+      session_id: randomUUID(),
+      coding_agent: agent,
+      real_session_id,
+      name,
+      cwd,
+      status: 'completed',
+      create_time: now,
+      modify_time: now,
+    };
+
+    deps.store.insert(session);
+    deps.sse.broadcast({ type: 'session_created', session_id: session.session_id, session });
+
+    return c.json(session, 201);
+  });
+
+  // Soft delete: remove the app's own record only. The agent's native session
+  // is deliberately left in place so it can be re-imported later (design §6.4) —
+  // the adapter is never asked to delete anything.
+  app.delete('/api/sessions/:id', (c) => {
+    const session_id = c.req.param('id');
+    const session = deps.store.get(session_id);
+    if (!session) return c.json({ error: 'session not found' }, 404);
+
+    deps.store.delete(session_id);
+    deps.sse.broadcast({ type: 'session_removed', session_id });
+    return c.json({ ok: true });
+  });
+
+  // Native sessions a folder already has for an agent, minus the ones the app is
+  // tracking. These are the re-import candidates: soft-deleted sessions still
+  // live in the agent's store under the same cwd, and so do sessions created
+  // outside the app.
+  app.get('/api/sessions/native', async (c) => {
+    const cwd = c.req.query('cwd') ?? '';
+    const agent = c.req.query('agent') ?? '';
+    if (!cwd) return c.json({ error: 'cwd is required' }, 400);
+    if (!agent) return c.json({ error: 'agent is required' }, 400);
+
+    const adapter = deps.adapters.get(agent);
+    if (!adapter) return c.json({ error: `unknown agent: ${agent}` }, 400);
+
+    const native = await adapter.listSessions(cwd);
+    const tracked = new Set(
+      deps.store
+        .list()
+        .filter((s) => s.coding_agent === agent)
+        .map((s) => s.real_session_id),
+    );
+    const candidates: ReimportableSession[] = native
+      .filter((n) => !tracked.has(n.real_session_id))
+      .map((n) => ({ ...n, coding_agent: agent, cwd }));
+    return c.json(candidates);
+  });
+
+  // Re-import: re-add a record pointing at a native session the app already
+  // knows how to talk to (soft-deleted, or created outside the app). No new
+  // native session is created. The name is taken from the request, or prefilled
+  // from the native summary when omitted.
+  app.post('/api/sessions/import', async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      cwd?: unknown;
+      agent?: unknown;
+      real_session_id?: unknown;
+      name?: unknown;
+    } | null;
+    const cwd = body?.cwd;
+    const agent = body?.agent;
+    const real_session_id = body?.real_session_id;
+
+    if (typeof cwd !== 'string' || cwd === '') return c.json({ error: 'cwd is required' }, 400);
+    if (typeof agent !== 'string' || agent === '') return c.json({ error: 'agent is required' }, 400);
+    if (typeof real_session_id !== 'string' || real_session_id === '') {
+      return c.json({ error: 'real_session_id is required' }, 400);
+    }
+
+    const adapter = deps.adapters.get(agent);
+    if (!adapter) return c.json({ error: `unknown agent: ${agent}` }, 400);
+
+    // The native session must actually exist in this folder.
+    const native = (await adapter.listSessions(cwd)).find((n) => n.real_session_id === real_session_id);
+    if (!native) return c.json({ error: 'native session not found' }, 404);
+
+    // Guard against double-import: one native session, one app record.
+    const already = deps.store
+      .list()
+      .some((s) => s.coding_agent === agent && s.real_session_id === real_session_id);
+    if (already) return c.json({ error: 'session already imported' }, 409);
+
+    const name =
+      typeof body?.name === 'string' && body.name.trim() !== ''
+        ? body.name.trim()
+        : (native.summary ?? real_session_id);
+
     const now = Date.now();
     const session: SessionRecord = {
       session_id: randomUUID(),

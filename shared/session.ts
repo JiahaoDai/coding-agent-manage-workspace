@@ -44,6 +44,13 @@ export interface NativeSession {
   modify_time?: number;
 }
 
+/** A native session offered for re-import: it exists in the agent's store but
+ * not in the app's own store (soft-deleted, or created outside the app). */
+export interface ReimportableSession extends NativeSession {
+  coding_agent: AgentId;
+  cwd: string;
+}
+
 /** A message read from an agent's native store at display time. */
 export interface Message {
   role: 'user' | 'assistant' | 'system';

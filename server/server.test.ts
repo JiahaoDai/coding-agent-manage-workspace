@@ -41,9 +41,21 @@ class ScriptedAdapter extends BaseAdapter {
   maxConcurrentPrompts = 0;
   private activePrompts = 0;
 
-  async createSession(cwd: string): Promise<{ real_session_id: string }> {
+  /** Simulated native store, separate from the app's SQLite store. Persists
+   * across soft deletes so re-import is testable. */
+  readonly nativeSessions: Array<{ real_session_id: string; cwd: string; summary: string }> = [];
+
+  async createSession(cwd: string, opts?: { name?: string }): Promise<{ real_session_id: string }> {
     this.created.push(cwd);
-    return { real_session_id: `native-${cwd}` };
+    const real_session_id = `native-${cwd}`;
+    this.nativeSessions.push({ real_session_id, cwd, summary: opts?.name ?? 'native session' });
+    return { real_session_id };
+  }
+
+  async listSessions(cwd: string): Promise<Array<{ real_session_id: string; cwd: string; summary: string }>> {
+    return this.nativeSessions
+      .filter((n) => n.cwd === cwd)
+      .map(({ real_session_id, cwd: c, summary }) => ({ real_session_id, cwd: c, summary }));
   }
 
   async prompt(
@@ -808,9 +820,11 @@ describe('concurrent sessions (ticket #4)', () => {
       const pB = post(baseUrl, `/api/sessions/${b.session_id}/message`, { text: 'ok' });
 
       const events = await collectEvents(reader, (evs) => {
-        const aError = evs.some(
-          (e) =>
-            e.type === 'status_change' && e.session_id === a.session_id && e.status === 'error',
+        // Wait for A's error message too — declaring done on the status_change
+        // alone can return before the trailing `error` event lands in the
+        // stream, making the assertions below race with the SSE reader.
+        const aErrored = evs.some(
+          (e) => e.type === 'error' && e.session_id === a.session_id,
         );
         const bDone = evs.some(
           (e) =>
@@ -818,7 +832,7 @@ describe('concurrent sessions (ticket #4)', () => {
             e.session_id === b.session_id &&
             e.status === 'completed',
         );
-        return aError && bDone;
+        return aErrored && bDone;
       });
 
       // A's failure is tagged to A only.
@@ -843,6 +857,147 @@ describe('concurrent sessions (ticket #4)', () => {
 
       await Promise.all([pA, pB]);
       await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+});
+
+describe('soft delete + re-import (ticket #6)', () => {
+  it('soft delete removes the record, broadcasts session_removed, and keeps the native session', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const created = await createSession(baseUrl, 'Doomed');
+      const real = created.real_session_id;
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const res = await fetch(`${baseUrl}/api/sessions/${created.session_id}`, { method: 'DELETE' });
+      expect(res.status).toBe(200);
+
+      // Gone from the app's list.
+      const list = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
+      expect(list.some((s) => s.session_id === created.session_id)).toBe(false);
+
+      // The client is told the session was removed.
+      const event = await waitForEvent(reader, 'session_removed');
+      expect(event.session_id).toBe(created.session_id);
+
+      // The native session is untouched — it still lists under its folder.
+      const native = await fake.listSessions(created.cwd);
+      expect(native.some((n) => n.real_session_id === real)).toBe(true);
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('exposes a soft-deleted session as a re-import candidate', async () => {
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const created = await createSession(baseUrl, 'Orig');
+      // While tracked, the native session is NOT a candidate.
+      let native = (await (await fetch(`${baseUrl}/api/sessions/native?cwd=${encodeURIComponent(created.cwd)}&agent=fake`)).json()) as unknown[];
+      expect(native).toHaveLength(0);
+
+      await fetch(`${baseUrl}/api/sessions/${created.session_id}`, { method: 'DELETE' });
+
+      // After soft delete it is.
+      native = (await (await fetch(`${baseUrl}/api/sessions/native?cwd=${encodeURIComponent(created.cwd)}&agent=fake`)).json()) as Array<{
+        real_session_id: string;
+        cwd: string;
+        summary: string;
+        coding_agent: string;
+      }>;
+      expect(native).toEqual([
+        {
+          real_session_id: created.real_session_id,
+          cwd: created.cwd,
+          summary: 'Orig',
+          coding_agent: 'fake',
+        },
+      ]);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('re-imports a deleted session pointing at the same native session', async () => {
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const created = await createSession(baseUrl, 'Orig');
+      await fetch(`${baseUrl}/api/sessions/${created.session_id}`, { method: 'DELETE' });
+
+      const res = await post(baseUrl, '/api/sessions/import', {
+        cwd: created.cwd,
+        agent: 'fake',
+        real_session_id: created.real_session_id,
+      });
+      expect(res.status).toBe(201);
+
+      const imported = (await res.json()) as SessionRecord;
+      // Same native session, brand-new app record, name prefilled from the summary.
+      expect(imported.real_session_id).toBe(created.real_session_id);
+      expect(imported.session_id).not.toBe(created.session_id);
+      expect(imported.name).toBe('Orig');
+      expect(imported.cwd).toBe(created.cwd);
+      expect(imported.status).toBe('completed');
+
+      const list = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
+      expect(list.map((s) => s.session_id)).toEqual([imported.session_id]);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('refuses to import a session the app already tracks, or a missing native session', async () => {
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const created = await createSession(baseUrl, 'Already here');
+
+      // Already tracked → conflict.
+      const dup = await post(baseUrl, '/api/sessions/import', {
+        cwd: created.cwd,
+        agent: 'fake',
+        real_session_id: created.real_session_id,
+      });
+      expect(dup.status).toBe(409);
+
+      // Native session does not exist → not found.
+      const missing = await post(baseUrl, '/api/sessions/import', {
+        cwd: created.cwd,
+        agent: 'fake',
+        real_session_id: 'native-does-not-exist',
+      });
+      expect(missing.status).toBe(404);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('validates delete and import inputs', async () => {
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const del = await fetch(`${baseUrl}/api/sessions/nope`, { method: 'DELETE' });
+      expect(del.status).toBe(404);
+
+      const emptyImport = await post(baseUrl, '/api/sessions/import', {});
+      expect(emptyImport.status).toBe(400);
+
+      const nativeNoCwd = await fetch(`${baseUrl}/api/sessions/native?agent=fake`);
+      expect(nativeNoCwd.status).toBe(400);
+
+      const nativeBadAgent = await fetch(
+        `${baseUrl}/api/sessions/native?cwd=/tmp/x&agent=unknown`,
+      );
+      expect(nativeBadAgent.status).toBe(400);
     } finally {
       server.close();
       db.close();

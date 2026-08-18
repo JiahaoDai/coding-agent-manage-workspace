@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { PromptHandlers } from '../../shared/adapter';
+import type { NativeSession } from '../../shared/session';
 import { BaseAdapter } from './base';
 
 /**
@@ -11,10 +12,29 @@ import { BaseAdapter } from './base';
  * permission request for a Bash command, then a completed status — so the
  * streaming UI (including the permission modal) is exercisable end-to-end.
  * Registered only in the dev server (`server/index.ts`), never under test.
+ *
+ * A simulated native store backs `listSessions`, standing in for the agent's
+ * on-disk session store. It lives for the process lifetime and is separate
+ * from the app's SQLite store, so a soft-deleted session stays importable
+ * (ticket #6).
  */
 export class FakeAdapter extends BaseAdapter {
-  async createSession(_cwd: string): Promise<{ real_session_id: string }> {
-    return { real_session_id: `fake-${randomUUID()}` };
+  private readonly native = new Map<string, { cwd: string; name: string }>();
+
+  async createSession(cwd: string, opts?: { name?: string }): Promise<{ real_session_id: string }> {
+    const real_session_id = `fake-${randomUUID()}`;
+    this.native.set(real_session_id, { cwd, name: opts?.name ?? 'fake session' });
+    return { real_session_id };
+  }
+
+  async listSessions(cwd: string): Promise<NativeSession[]> {
+    return [...this.native.entries()]
+      .filter(([, entry]) => entry.cwd === cwd)
+      .map(([real_session_id, entry]) => ({
+        real_session_id,
+        summary: entry.name,
+        cwd: entry.cwd,
+      }));
   }
 
   async prompt(
