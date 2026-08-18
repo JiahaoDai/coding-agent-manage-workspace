@@ -637,41 +637,50 @@ button {
   color: var(--status-error);
 }
 
-/* Re-import of soft-deleted (or external) native sessions */
-.reimport {
+/* Resume-vs-new selection of existing native sessions */
+.resume-options {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
+  margin: 0;
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-input);
 }
 
-.reimport-title {
-  margin: 0;
+.resume-options-title {
+  margin: 0 0 4px;
   font-size: 0.8rem;
   font-weight: 600;
   color: var(--text-primary);
 }
 
-.reimport-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.reimport-item {
+.resume-option {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color 0.15s var(--ease);
 }
 
-.reimport-item-label {
+.resume-option:hover {
+  background: var(--bg-hover);
+}
+
+.resume-option.is-selected {
+  background: var(--bg-surface);
+}
+
+.resume-option input[type='radio'] {
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.resume-option-label {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -681,30 +690,17 @@ button {
   color: var(--text-primary);
 }
 
-.reimport-btn {
+.resume-option-tag {
   flex-shrink: 0;
-  padding: 4px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  font: inherit;
-  font-size: 0.8rem;
-  font-weight: 500;
-  transition: background-color 0.15s var(--ease);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
 }
 
-.reimport-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
-.reimport-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.reimport-hint {
-  margin: 0;
+.resume-options-hint {
+  margin: 4px 0 0;
   font-size: 0.75rem;
   color: var(--text-secondary);
 }

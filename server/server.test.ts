@@ -45,10 +45,18 @@ class ScriptedAdapter extends BaseAdapter {
    * across soft deletes so re-import is testable. */
   readonly nativeSessions: Array<{ real_session_id: string; cwd: string; summary: string }> = [];
 
+  /** Native sessions the server asked to open/resume, in call order. */
+  readonly openCalls: Array<{ real_session_id: string; cwd: string }> = [];
+
   async createSession(cwd: string, opts?: { name?: string }): Promise<{ real_session_id: string }> {
     this.created.push(cwd);
     const real_session_id = `native-${cwd}`;
     this.nativeSessions.push({ real_session_id, cwd, summary: opts?.name ?? 'native session' });
+    return { real_session_id };
+  }
+
+  async openSession(real_session_id: string, cwd: string): Promise<{ real_session_id: string }> {
+    this.openCalls.push({ real_session_id, cwd });
     return { real_session_id };
   }
 
@@ -927,29 +935,34 @@ describe('soft delete + re-import (ticket #6)', () => {
     }
   });
 
-  it('re-imports a deleted session pointing at the same native session', async () => {
-    const { db, server, baseUrl } = await startServer();
+  it('resumes a deleted session pointing at the same native session and opens it', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
     try {
       const created = await createSession(baseUrl, 'Orig');
       await fetch(`${baseUrl}/api/sessions/${created.session_id}`, { method: 'DELETE' });
 
-      const res = await post(baseUrl, '/api/sessions/import', {
+      const res = await post(baseUrl, '/api/sessions/resume', {
         cwd: created.cwd,
         agent: 'fake',
         real_session_id: created.real_session_id,
       });
       expect(res.status).toBe(201);
 
-      const imported = (await res.json()) as SessionRecord;
+      const resumed = (await res.json()) as SessionRecord;
       // Same native session, brand-new app record, name prefilled from the summary.
-      expect(imported.real_session_id).toBe(created.real_session_id);
-      expect(imported.session_id).not.toBe(created.session_id);
-      expect(imported.name).toBe('Orig');
-      expect(imported.cwd).toBe(created.cwd);
-      expect(imported.status).toBe('completed');
+      expect(resumed.real_session_id).toBe(created.real_session_id);
+      expect(resumed.session_id).not.toBe(created.session_id);
+      expect(resumed.name).toBe('Orig');
+      expect(resumed.cwd).toBe(created.cwd);
+      expect(resumed.status).toBe('completed');
+
+      // The native session was actually opened so its history continues.
+      expect(fake.openCalls).toEqual([
+        { real_session_id: created.real_session_id, cwd: created.cwd },
+      ]);
 
       const list = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
-      expect(list.map((s) => s.session_id)).toEqual([imported.session_id]);
+      expect(list.map((s) => s.session_id)).toEqual([resumed.session_id]);
     } finally {
       server.close();
       db.close();
@@ -962,7 +975,7 @@ describe('soft delete + re-import (ticket #6)', () => {
       const created = await createSession(baseUrl, 'Already here');
 
       // Already tracked → conflict.
-      const dup = await post(baseUrl, '/api/sessions/import', {
+      const dup = await post(baseUrl, '/api/sessions/resume', {
         cwd: created.cwd,
         agent: 'fake',
         real_session_id: created.real_session_id,
@@ -970,7 +983,7 @@ describe('soft delete + re-import (ticket #6)', () => {
       expect(dup.status).toBe(409);
 
       // Native session does not exist → not found.
-      const missing = await post(baseUrl, '/api/sessions/import', {
+      const missing = await post(baseUrl, '/api/sessions/resume', {
         cwd: created.cwd,
         agent: 'fake',
         real_session_id: 'native-does-not-exist',
@@ -988,7 +1001,7 @@ describe('soft delete + re-import (ticket #6)', () => {
       const del = await fetch(`${baseUrl}/api/sessions/nope`, { method: 'DELETE' });
       expect(del.status).toBe(404);
 
-      const emptyImport = await post(baseUrl, '/api/sessions/import', {});
+      const emptyImport = await post(baseUrl, '/api/sessions/resume', {});
       expect(emptyImport.status).toBe(400);
 
       const nativeNoCwd = await fetch(`${baseUrl}/api/sessions/native?agent=fake`);

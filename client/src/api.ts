@@ -1,4 +1,4 @@
-import type { AgentId, ReimportableSession, SessionRecord } from './types';
+import type { AgentId, ResumableSession, SessionRecord } from './types';
 
 export async function listAgents(): Promise<AgentId[]> {
   const res = await fetch('/api/agents');
@@ -49,11 +49,11 @@ export async function deleteSession(sessionId: string): Promise<void> {
   }
 }
 
-/** Native sessions for a folder+agent that the app is not tracking — re-import candidates. */
+/** Native sessions for a folder+agent that the app is not tracking — resume candidates. */
 export async function listNativeSessions(
   cwd: string,
   agent: AgentId,
-): Promise<ReimportableSession[]> {
+): Promise<ResumableSession[]> {
   const res = await fetch(
     `/api/sessions/native?cwd=${encodeURIComponent(cwd)}&agent=${encodeURIComponent(agent)}`,
   );
@@ -64,21 +64,21 @@ export async function listNativeSessions(
   return res.json();
 }
 
-/** Re-import a native session into the app's list (after a soft delete, or one created outside the app). */
-export async function importSession(input: {
+/** Resume a native session: add an app record for it (after a soft delete, or one created outside the app). */
+export async function resumeSession(input: {
   cwd: string;
   agent: AgentId;
   real_session_id: string;
   name?: string;
 }): Promise<SessionRecord> {
-  const res = await fetch('/api/sessions/import', {
+  const res = await fetch('/api/sessions/resume', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(input),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `import failed: ${res.status}`);
+    throw new Error(body?.error ?? `resume failed: ${res.status}`);
   }
   return res.json();
 }

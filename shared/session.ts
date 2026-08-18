@@ -44,9 +44,10 @@ export interface NativeSession {
   modify_time?: number;
 }
 
-/** A native session offered for re-import: it exists in the agent's store but
- * not in the app's own store (soft-deleted, or created outside the app). */
-export interface ReimportableSession extends NativeSession {
+/** A native session offered for resume at create time: it exists in the agent's
+ * store but not in the app's own store (soft-deleted, or created outside the
+ * app), so a fresh record can be created to continue it. */
+export interface ResumableSession extends NativeSession {
   coding_agent: AgentId;
   cwd: string;
 }

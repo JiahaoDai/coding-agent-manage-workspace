@@ -4,8 +4,8 @@
 
 **Blocked by:** #1 — Walking skeleton: create & list a session (fake agent)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Existing native sessions for the chosen directory and agent are detected and listed.
-- [ ] The user can choose to resume an existing native session or start a new one.
-- [ ] Resuming prefills the name (from native summary or first prompt) and it stays editable.
+- [x] Existing native sessions for the chosen directory and agent are detected and listed.
+- [x] The user can choose to resume an existing native session or start a new one.
+- [x] Resuming prefills the name (from native summary or first prompt) and it stays editable.

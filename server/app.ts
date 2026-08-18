@@ -6,7 +6,7 @@ import type { SessionStore } from './db';
 import { PermissionBroker } from './permission';
 import type { SseHub } from './sse';
 import type { PromptHandlers } from '../shared/adapter';
-import type { ReimportableSession, SessionRecord } from '../shared/session';
+import type { ResumableSession, SessionRecord } from '../shared/session';
 
 export interface AppDeps {
   store: SessionStore;
@@ -68,9 +68,9 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // Native sessions a folder already has for an agent, minus the ones the app is
-  // tracking. These are the re-import candidates: soft-deleted sessions still
-  // live in the agent's store under the same cwd, and so do sessions created
-  // outside the app.
+  // tracking. These are the resume candidates: soft-deleted sessions still live
+  // in the agent's store under the same cwd, and so do sessions created outside
+  // the app.
   app.get('/api/sessions/native', async (c) => {
     const cwd = c.req.query('cwd') ?? '';
     const agent = c.req.query('agent') ?? '';
@@ -87,17 +87,18 @@ export function createApp(deps: AppDeps): Hono {
         .filter((s) => s.coding_agent === agent)
         .map((s) => s.real_session_id),
     );
-    const candidates: ReimportableSession[] = native
+    const candidates: ResumableSession[] = native
       .filter((n) => !tracked.has(n.real_session_id))
       .map((n) => ({ ...n, coding_agent: agent, cwd }));
     return c.json(candidates);
   });
 
-  // Re-import: re-add a record pointing at a native session the app already
-  // knows how to talk to (soft-deleted, or created outside the app). No new
-  // native session is created. The name is taken from the request, or prefilled
-  // from the native summary when omitted.
-  app.post('/api/sessions/import', async (c) => {
+  // Resume: create a record pointing at a native session the app already knows
+  // how to talk to (soft-deleted, or created outside the app). No new native
+  // session is created — the agent's native session is opened so its history is
+  // continued. The name is taken from the request, or prefilled from the native
+  // summary when omitted.
+  app.post('/api/sessions/resume', async (c) => {
     const body = (await c.req.json().catch(() => null)) as {
       cwd?: unknown;
       agent?: unknown;
@@ -121,11 +122,16 @@ export function createApp(deps: AppDeps): Hono {
     const native = (await adapter.listSessions(cwd)).find((n) => n.real_session_id === real_session_id);
     if (!native) return c.json({ error: 'native session not found' }, 404);
 
-    // Guard against double-import: one native session, one app record.
+    // Guard against resuming a session the app already tracks: one native
+    // session, one app record.
     const already = deps.store
       .list()
       .some((s) => s.coding_agent === agent && s.real_session_id === real_session_id);
     if (already) return c.json({ error: 'session already imported' }, 409);
+
+    // Open the native session so its history continues (a no-op for the fake
+    // adapters; the real adapters do the actual resume here).
+    await adapter.openSession(real_session_id, cwd);
 
     const name =
       typeof body?.name === 'string' && body.name.trim() !== ''

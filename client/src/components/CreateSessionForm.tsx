@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { createSession, importSession, listNativeSessions } from '../api';
-import type { AgentId, ReimportableSession, SessionRecord } from '../types';
+import { createSession, listNativeSessions, resumeSession } from '../api';
+import type { AgentId, ResumableSession, SessionRecord } from '../types';
 
 export function CreateSessionForm({
   agents,
@@ -16,23 +16,25 @@ export function CreateSessionForm({
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  // Native sessions in this folder+agent the app isn't tracking (soft-deleted,
-  // or created outside the app) — offered for re-import.
-  const [importables, setImportables] = useState<ReimportableSession[]>([]);
-  const [importingId, setImportingId] = useState<string | null>(null);
+  // Native sessions in this folder+agent the app isn't tracking. The user can
+  // resume one (continues its history) or start a brand-new session.
+  const [resumable, setResumable] = useState<ResumableSession[]>([]);
+  // real_session_id of the session being resumed, or null for a new session.
+  const [resumeTarget, setResumeTarget] = useState<string | null>(null);
 
   const canLookup = cwd.trim() !== '' && agent !== '';
 
   useEffect(() => {
     let cancelled = false;
     if (!canLookup) {
-      setImportables([]);
+      setResumable([]);
       return;
     }
-    setImportables([]);
+    setResumable([]);
+    setResumeTarget(null);
     void listNativeSessions(cwd.trim(), agent)
       .then((list) => {
-        if (!cancelled) setImportables(list);
+        if (!cancelled) setResumable(list);
       })
       .catch(() => {
         // Best-effort: if the lookup fails (e.g. unknown agent) just show none.
@@ -48,29 +50,29 @@ export function CreateSessionForm({
     setError(null);
     setSubmitting(true);
     try {
-      const session = await createSession({ cwd: cwd.trim(), agent, name: name.trim() });
-      onCreated(session);
+      if (resumeTarget) {
+        const target = resumable.find((s) => s.real_session_id === resumeTarget);
+        const session = await resumeSession({
+          cwd: cwd.trim(),
+          agent,
+          real_session_id: resumeTarget,
+          name: name.trim() || (target?.summary ?? resumeTarget),
+        });
+        onCreated(session);
+      } else {
+        const session = await createSession({ cwd: cwd.trim(), agent, name: name.trim() });
+        onCreated(session);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
     }
   }
 
-  async function handleImport(session: ReimportableSession) {
-    setError(null);
-    setImportingId(session.real_session_id);
-    try {
-      const imported = await importSession({
-        cwd: cwd.trim(),
-        agent,
-        real_session_id: session.real_session_id,
-        name: session.summary ?? session.real_session_id,
-      });
-      onCreated(imported);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setImportingId(null);
-    }
+  function handlePickResume(session: ResumableSession) {
+    setResumeTarget(session.real_session_id);
+    // Prefill the editable name from the native summary (or first prompt).
+    setName(session.summary ?? session.real_session_id);
   }
 
   return (
@@ -99,18 +101,12 @@ export function CreateSessionForm({
       </div>
 
       <label className="field">
-        <span className="field-label">Name</span>
-        <input
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          placeholder="e.g. Refactor the auth flow"
-          autoFocus
-        />
-      </label>
-
-      <label className="field">
         <span className="field-label">Agent</span>
-        <select value={agent} onChange={(event) => setAgent(event.target.value)}>
+        <select
+          value={agent}
+          onChange={(event) => setAgent(event.target.value)}
+          autoFocus
+        >
           <option value="" disabled>
             Select an agent
           </option>
@@ -131,31 +127,49 @@ export function CreateSessionForm({
         />
       </label>
 
-      {canLookup && importables.length > 0 && (
-        <div className="reimport">
-          <h3 className="reimport-title">Existing sessions in this folder</h3>
-          <ul className="reimport-list">
-            {importables.map((s) => (
-              <li key={s.real_session_id} className="reimport-item">
-                <span className="reimport-item-label" title={s.summary ?? s.real_session_id}>
-                  {s.summary ?? s.real_session_id}
-                </span>
-                <button
-                  type="button"
-                  className="reimport-btn"
-                  onClick={() => void handleImport(s)}
-                  disabled={importingId !== null}
-                >
-                  {importingId === s.real_session_id ? 'Importing…' : 'Import'}
-                </button>
-              </li>
-            ))}
-          </ul>
-          <p className="reimport-hint">
-            Re-imports a session that was deleted here — the agent&apos;s original session is kept.
+      {canLookup && resumable.length > 0 && (
+        <fieldset className="resume-options">
+          <legend className="resume-options-title">Start from</legend>
+          <label className={`resume-option${resumeTarget === null ? ' is-selected' : ''}`}>
+            <input
+              type="radio"
+              name="resume"
+              checked={resumeTarget === null}
+              onChange={() => setResumeTarget(null)}
+            />
+            <span className="resume-option-label">New session</span>
+          </label>
+          {resumable.map((s) => (
+            <label
+              key={s.real_session_id}
+              className={`resume-option${resumeTarget === s.real_session_id ? ' is-selected' : ''}`}
+            >
+              <input
+                type="radio"
+                name="resume"
+                checked={resumeTarget === s.real_session_id}
+                onChange={() => handlePickResume(s)}
+              />
+              <span className="resume-option-label" title={s.summary ?? s.real_session_id}>
+                {s.summary ?? s.real_session_id}
+              </span>
+              <span className="resume-option-tag">resume</span>
+            </label>
+          ))}
+          <p className="resume-options-hint">
+            Existing sessions in this folder — resume one to continue its history, or start fresh.
           </p>
-        </div>
+        </fieldset>
       )}
+
+      <label className="field">
+        <span className="field-label">Name</span>
+        <input
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          placeholder={resumeTarget ? 'Resumed session name' : 'e.g. Refactor the auth flow'}
+        />
+      </label>
 
       {error && (
         <p className="error" role="alert">
@@ -168,7 +182,11 @@ export function CreateSessionForm({
           Cancel
         </button>
         <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
-          {submitting ? 'Creating…' : 'Create session'}
+          {submitting
+            ? 'Starting…'
+            : resumeTarget
+              ? 'Resume session'
+              : 'Create session'}
         </button>
       </div>
     </form>

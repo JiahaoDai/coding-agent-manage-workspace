@@ -7,7 +7,7 @@ import type { Message, NativeSession } from '../../shared/session';
  * and the test fakes). Concrete fakes implement `createSession` and `prompt`.
  */
 export abstract class BaseAdapter implements AgentAdapter {
-  async openSession(real_session_id: string): Promise<{ real_session_id: string }> {
+  async openSession(real_session_id: string, _cwd: string): Promise<{ real_session_id: string }> {
     return { real_session_id };
   }
 
