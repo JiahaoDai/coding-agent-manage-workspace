@@ -39,3 +39,20 @@ export async function sendMessage(sessionId: string, text: string): Promise<void
     throw new Error(body?.error ?? `send failed: ${res.status}`);
   }
 }
+
+/** Answer a pending permission request. The agent's turn only continues after this resolves. */
+export async function respondPermission(
+  sessionId: string,
+  request_id: string,
+  decision: 'allow' | 'deny',
+): Promise<void> {
+  const res = await fetch(`/api/sessions/${sessionId}/permission`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ request_id, decision }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `permission respond failed: ${res.status}`);
+  }
+}

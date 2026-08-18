@@ -19,9 +19,16 @@ class ScriptedAdapter extends BaseAdapter {
   readonly created: string[] = [];
   promptCalls: Array<{ real_session_id: string; cwd: string; input: string }> = [];
   /** If set, run this script when prompt is called (drives the stream handlers). */
-  promptScript?: (handlers: PromptHandlers) => void;
+  promptScript?: (handlers: PromptHandlers) => void | Promise<void>;
   /** If set, prompt rejects with this message instead of running the script. */
   promptError?: string;
+  /** Decisions the adapter saw from onPermissionRequest, in call order. */
+  permissionDecisions: Array<{
+    request_id: string;
+    tool_name: string;
+    input: unknown;
+    decision: 'allow' | 'deny';
+  }> = [];
 
   async createSession(cwd: string): Promise<{ real_session_id: string }> {
     this.created.push(cwd);
@@ -36,7 +43,7 @@ class ScriptedAdapter extends BaseAdapter {
   ): Promise<void> {
     this.promptCalls.push({ real_session_id, cwd, input });
     if (this.promptError) throw new Error(this.promptError);
-    if (this.promptScript) this.promptScript(handlers);
+    if (this.promptScript) await this.promptScript(handlers);
   }
 }
 
@@ -64,6 +71,12 @@ async function post(baseUrl: string, path: string, body: unknown): Promise<Respo
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
+}
+
+async function createSession(baseUrl: string, name: string): Promise<SessionRecord> {
+  const res = await post(baseUrl, '/api/sessions', { cwd: '/tmp/p', agent: 'fake', name });
+  expect(res.status).toBe(201);
+  return (await res.json()) as SessionRecord;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -406,6 +419,190 @@ describe('streaming conversation (ticket #2)', () => {
       expect(emptyText.status).toBe(400);
       const noText = await post(baseUrl, `/api/sessions/${created.session_id}/message`, {});
       expect(noText.status).toBe(400);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+});
+
+describe('interactive permission confirmation (ticket #3)', () => {
+  /** Script that asks one permission request and records the decision it saw. */
+  function permissionScript(fake: ScriptedAdapter, request_id: string) {
+    return async (handlers: PromptHandlers): Promise<void> => {
+      const decision = await handlers.onPermissionRequest(request_id, 'Bash', { command: 'ls' });
+      fake.permissionDecisions.push({ request_id, tool_name: 'Bash', input: { command: 'ls' }, decision });
+      handlers.onStatusChange('completed');
+    };
+  }
+
+  it('broadcasts the request (tool name + args) and allow lets the agent proceed', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = permissionScript(fake, 'p-1');
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const created = await createSession(baseUrl, 'perm allow');
+
+      // Fire the message without awaiting: the turn pauses on the permission
+      // request and only finishes after we answer it.
+      const sendPromise = post(baseUrl, `/api/sessions/${created.session_id}/message`, { text: 'go' });
+
+      const request = await waitForEvent(reader, 'permission_request');
+      expect(request).toMatchObject({
+        type: 'permission_request',
+        session_id: created.session_id,
+        request_id: 'p-1',
+        tool_name: 'Bash',
+        input: { command: 'ls' },
+      });
+
+      const res = await post(baseUrl, `/api/sessions/${created.session_id}/permission`, {
+        request_id: 'p-1',
+        decision: 'allow',
+      });
+      expect(res.status).toBe(200);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.some((e) => e.type === 'status_change' && e.status === 'completed'),
+      );
+
+      // The adapter saw the allow and the turn completed.
+      expect(fake.permissionDecisions).toEqual([
+        { request_id: 'p-1', tool_name: 'Bash', input: { command: 'ls' }, decision: 'allow' },
+      ]);
+      expect(events.some((e) => e.type === 'permission_response' && e.decision === 'allow')).toBe(true);
+
+      await sendPromise;
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('deny is reported back to the agent, which completes adjusted', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = permissionScript(fake, 'p-2');
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const created = await createSession(baseUrl, 'perm deny');
+      const sendPromise = post(baseUrl, `/api/sessions/${created.session_id}/message`, { text: 'go' });
+
+      await waitForEvent(reader, 'permission_request');
+      const res = await post(baseUrl, `/api/sessions/${created.session_id}/permission`, {
+        request_id: 'p-2',
+        decision: 'deny',
+      });
+      expect(res.status).toBe(200);
+
+      await collectEvents(
+        reader,
+        (evs) => evs.some((e) => e.type === 'status_change' && e.status === 'completed'),
+      );
+
+      expect(fake.permissionDecisions[0].decision).toBe('deny');
+
+      await sendPromise;
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('rejects a permission response aimed at a different session', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = permissionScript(fake, 'p-3');
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const owner = await createSession(baseUrl, 'owner');
+      const other = await createSession(baseUrl, 'other');
+      const sendPromise = post(baseUrl, `/api/sessions/${owner.session_id}/message`, { text: 'go' });
+
+      const event = await waitForEvent(reader, 'permission_request');
+      const request = event as Extract<ServerEvent, { type: 'permission_request' }>;
+
+      // Answering the owner's request through the *other* session's endpoint
+      // must not resolve it.
+      const wrong = await post(baseUrl, `/api/sessions/${other.session_id}/permission`, {
+        request_id: request.request_id,
+        decision: 'allow',
+      });
+      expect(wrong.status).toBe(404);
+
+      const right = await post(baseUrl, `/api/sessions/${owner.session_id}/permission`, {
+        request_id: request.request_id,
+        decision: 'allow',
+      });
+      expect(right.status).toBe(200);
+
+      await sendPromise;
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('rejects malformed permission responses and unknown requests', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = permissionScript(fake, 'p-4');
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const created = await createSession(baseUrl, 'perm validation');
+      const sendPromise = post(baseUrl, `/api/sessions/${created.session_id}/message`, { text: 'go' });
+
+      await waitForEvent(reader, 'permission_request');
+
+      // Missing session.
+      const missing = await post(baseUrl, `/api/sessions/does-not-exist/permission`, {
+        request_id: 'p-4',
+        decision: 'allow',
+      });
+      expect(missing.status).toBe(404);
+
+      // Missing / bad request id and bad decision.
+      const noId = await post(baseUrl, `/api/sessions/${created.session_id}/permission`, { decision: 'allow' });
+      expect(noId.status).toBe(400);
+      const badDecision = await post(baseUrl, `/api/sessions/${created.session_id}/permission`, {
+        request_id: 'p-4',
+        decision: 'maybe',
+      });
+      expect(badDecision.status).toBe(400);
+
+      // Unknown request id (never asked) → not resolved.
+      const unknown = await post(baseUrl, `/api/sessions/${created.session_id}/permission`, {
+        request_id: 'never-asked',
+        decision: 'allow',
+      });
+      expect(unknown.status).toBe(404);
+
+      // The real request is still pending and answerable afterwards.
+      const ok = await post(baseUrl, `/api/sessions/${created.session_id}/permission`, {
+        request_id: 'p-4',
+        decision: 'allow',
+      });
+      expect(ok.status).toBe(200);
+
+      await sendPromise;
+      await reader.cancel();
     } finally {
       server.close();
       db.close();

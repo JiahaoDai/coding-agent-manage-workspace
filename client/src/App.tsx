@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { listAgents, listSessions, sendMessage } from './api';
+import { listAgents, listSessions, respondPermission, sendMessage } from './api';
 import { ConversationView } from './components/ConversationView';
 import { CreateSessionForm } from './components/CreateSessionForm';
 import { EmptyState } from './components/EmptyState';
+import { PermissionModal } from './components/PermissionModal';
 import { Sidebar } from './components/Sidebar';
 import {
   applyStreamEvent,
@@ -11,7 +12,7 @@ import {
   type ConversationMessage,
   type StreamableServerEvent,
 } from './conversation';
-import type { AgentId, ServerEvent, SessionRecord } from './types';
+import type { AgentId, PermissionRequest, ServerEvent, SessionRecord } from './types';
 
 /** Prepend only if the session is not already present — both the POST response
  * and the SSE `session_created` event may deliver the same session. */
@@ -26,6 +27,9 @@ export function App() {
   const [creating, setCreating] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Record<string, ConversationMessage[]>>({});
+  // Outstanding permission requests, oldest first, across all sessions. The
+  // modal shows the first; the rest queue behind it.
+  const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
 
   useEffect(() => {
     void listAgents().then(setAgents);
@@ -67,6 +71,19 @@ export function App() {
           }
           break;
         }
+        case 'permission_request':
+          setPermissionQueue((prev) =>
+            prev.some((p) => p.request_id === event.request_id)
+              ? prev
+              : [...prev, { session_id: event.session_id, request_id: event.request_id, tool_name: event.tool_name, input: event.input }],
+          );
+          break;
+        case 'permission_response':
+          // The request is resolved (by this tab or another); drop it so the
+          // modal doesn't linger. Filtering by id is idempotent for the tab
+          // that just answered optimistically.
+          setPermissionQueue((prev) => prev.filter((p) => p.request_id !== event.request_id));
+          break;
       }
     };
     return () => source.close();
@@ -86,7 +103,29 @@ export function App() {
     }
   }
 
+  async function handlePermissionDecision(request: PermissionRequest, decision: 'allow' | 'deny') {
+    // Drop optimistically; a server-side failure means the request is already
+    // gone (answered elsewhere / session removed), so there is nothing to retry.
+    setPermissionQueue((prev) => prev.filter((p) => p.request_id !== request.request_id));
+    try {
+      await respondPermission(request.session_id, request.request_id, decision);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setConversations((prev) => ({
+        ...prev,
+        [request.session_id]: applyStreamEvent(prev[request.session_id] ?? [], {
+          type: 'error',
+          message: `Permission response failed: ${detail}`,
+        }),
+      }));
+    }
+  }
+
   const selected = sessions.find((s) => s.session_id === selectedId) ?? null;
+  const pendingPermission = permissionQueue[0] ?? null;
+  const pendingSession = pendingPermission
+    ? sessions.find((s) => s.session_id === pendingPermission.session_id)
+    : null;
 
   return (
     <div className="app">
@@ -121,6 +160,14 @@ export function App() {
           <EmptyState onNewSession={() => setCreating(true)} />
         )}
       </main>
+
+      {pendingPermission && (
+        <PermissionModal
+          request={pendingPermission}
+          sessionLabel={pendingSession ? `${pendingSession.name} · ${pendingSession.coding_agent}` : 'a session'}
+          onDecision={(decision) => void handlePermissionDecision(pendingPermission, decision)}
+        />
+      )}
     </div>
   );
 }

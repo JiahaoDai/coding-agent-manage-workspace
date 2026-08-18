@@ -7,9 +7,10 @@ import { BaseAdapter } from './base';
  * lands (tickets #9–#11). It satisfies the full `AgentAdapter` contract via
  * `BaseAdapter` (the no-op parts) plus a scripted turn here.
  *
- * `prompt` drives a short scripted turn — thinking, text, a tool call, then a
- * completed status — so the streaming UI is exercisable end-to-end. Registered
- * only in the dev server (`server/index.ts`), never under test.
+ * `prompt` drives a short scripted turn — thinking, text, an interactive
+ * permission request for a Bash command, then a completed status — so the
+ * streaming UI (including the permission modal) is exercisable end-to-end.
+ * Registered only in the dev server (`server/index.ts`), never under test.
  */
 export class FakeAdapter extends BaseAdapter {
   async createSession(_cwd: string): Promise<{ real_session_id: string }> {
@@ -30,10 +31,24 @@ export class FakeAdapter extends BaseAdapter {
     handlers.onTextDelta(`Got it — "${input}". Here's what I'll do:`);
     await pause(200);
 
-    const toolId = `fake-tool-${randomUUID()}`;
-    handlers.onToolCallStart(toolId, 'Bash', { command: `ls -la ${cwd}` });
-    await pause(350);
-    handlers.onToolCallEnd(toolId);
+    // Demonstrate the interactive permission gate: the agent wants to run a
+    // command, so it asks before touching anything. The turn only continues
+    // once the user allows or denies from the modal.
+    const command = `ls -la ${cwd}`;
+    const permissionId = `fake-perm-${randomUUID()}`;
+    const decision = await handlers.onPermissionRequest(permissionId, 'Bash', { command });
+
+    if (decision === 'allow') {
+      const toolId = `fake-tool-${randomUUID()}`;
+      handlers.onToolCallStart(toolId, 'Bash', { command });
+      await pause(350);
+      handlers.onToolCallEnd(toolId);
+      handlers.onTextDelta(`\nRan \`${command}\` — it looks fine.`);
+    } else {
+      // Denial is reported back: the agent stops that action and adjusts.
+      handlers.onTextDelta(`\nSkipped \`${command}\` because you denied permission. Proceeding without it.`);
+    }
+    await pause(150);
 
     handlers.onTextDelta("\nThat's the walkthrough for this fake turn.");
     await pause(150);

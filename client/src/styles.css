@@ -782,6 +782,125 @@ button:focus-visible {
 }
 
 /* ============================================================
+   Permission modal
+   ============================================================ */
+.permission-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(4px);
+}
+
+.permission-modal {
+  width: min(100%, 460px);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.permission-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.permission-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: rgba(16, 163, 127, 0.12);
+  color: var(--accent);
+}
+
+.permission-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.permission-heading h3 {
+  margin: 2px 0 2px;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.permission-sub {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.permission-session {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.permission-tool {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.permission-tool-name {
+  display: inline-flex;
+  align-items: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+}
+
+.permission-tool-args-label {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.permission-args {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.permission-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.btn-deny {
+  border-color: var(--status-error);
+  color: var(--status-error);
+}
+
+.btn-deny:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.08);
+}
+
+/* ============================================================
    Narrow viewports
    ============================================================ */
 @media (max-width: 640px) {

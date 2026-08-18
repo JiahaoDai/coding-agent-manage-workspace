@@ -36,6 +36,14 @@ export interface PromptHandlers {
   onToolCallEnd(tool_call_id: string): void;
   onThinkingDelta(text: string): void;
   onStatusChange(status: SessionStatus): void;
-  /** Interactive permission confirmation. Resolve with the user's decision. */
+  /**
+   * Interactive permission confirmation. Called when the agent wants to run a
+   * tool that isn't auto-approved. Resolve with the user's decision; `deny` is
+   * reported back to the agent so it can stop or adjust.
+   *
+   * Adapters MUST launch their agent with the equivalent of
+   * `permissionMode: 'default'` (never bypass/accept-edits) so every such tool
+   * surfaces here instead of silently running.
+   */
   onPermissionRequest(request_id: string, tool_name: string, input: unknown): Promise<'allow' | 'deny'>;
 }
