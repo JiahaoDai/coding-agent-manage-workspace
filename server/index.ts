@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { AdapterRegistry } from './adapters/registry';
 import { ClaudeAdapter } from './adapters/claude';
 import { FakeAdapter } from './adapters/fake';
+import { OpenCodeAdapter } from './adapters/opencode';
 import { createApp } from './app';
 import { SessionStore } from './db';
 import { createFsTree } from './fs/tree';
@@ -20,12 +21,11 @@ if (DB_PATH !== ':memory:') {
 const db = new Database(DB_PATH);
 const store = new SessionStore(db);
 const adapters = new AdapterRegistry();
-// Claude Code is real (ticket #9); the remaining agents stay on the fake
-// adapter until their adapters land (tickets #10–#11).
+// Claude Code (ticket #9) and OpenCode (ticket #10) are real; Pi stays on the
+// fake adapter until its adapter lands (ticket #11).
 adapters.register('claude', new ClaudeAdapter());
-for (const id of ['opencode', 'pi']) {
-  adapters.register(id, new FakeAdapter());
-}
+adapters.register('opencode', new OpenCodeAdapter());
+adapters.register('pi', new FakeAdapter());
 const sse = new SseHub();
 const app = createApp({ store, adapters, sse, fs: createFsTree() });
 

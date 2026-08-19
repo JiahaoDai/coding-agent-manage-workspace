@@ -64,14 +64,14 @@
 | 中断/取消 | `Query.interrupt()` / abortController | `session.abort({ id })` | `session.abort()` |
 | 列出会话 | `listSessions({ dir })` | `session.list()` | `SessionManager.list(cwd)` / `listAll` |
 | 读历史消息 | `getSessionMessages(id, { dir })` | `session.messages({ id })` | `session.messages` |
-| 恢复/继续 | ✅ `resume` / `continue` / `forkSession` | ⚠️ 无原生 resume；同一 id 再 `prompt` + `fork` | ✅ `continueRecent` / `open` / `fork` / `clone` |
-| 权限交互 | ✅ `canUseTool` 回调（async，可挂起等待） | ⚠️ `permission` 事件（approve/deny 形状待核实） | ⚠️ 审批流程（具体形状待核实） |
+| 恢复/继续 | ✅ `resume` / `continue` / `forkSession` | ✅ 无原生 resume；同一 id 再 `prompt`（re-prompt，已核实） | ✅ `continueRecent` / `open` / `fork` / `clone` |
+| 权限交互 | ✅ `canUseTool` 回调（async，可挂起等待） | ✅ `permission.asked` 事件 + `POST /session/{id}/permissions/{permissionID}`，body `{ response: "once" \| "always" \| "reject" }`（已核实） | ⚠️ 审批流程（具体形状待核实） |
 
 **关键差异（影响设计）：**
 
 - **恢复会话**：Claude Code 与 Pi 原生支持；OpenCode 需特判（向同一 session id 再发 `prompt`，或 `fork`）。
 - **目录绑定**：Claude Code / Pi 在创建时指定 `cwd`；OpenCode 以启动时的目录为 project 上下文，需按其 project 概念映射目录。
-- **权限链路**：Claude Code 的 `canUseTool` 已逐字核实可行；OpenCode / Pi 在实现前需确认 approve/deny 的精确回传形状。
+- **权限链路**：Claude Code 的 `canUseTool` 已逐字核实可行；OpenCode 的 `permission.asked` 事件 + `{ response: "once"|"always"|"reject" }` 回传已核实（ticket #10）；Pi 在实现前需确认。
 
 ---
 
@@ -208,7 +208,7 @@ SQLite 数据库，核心表 `session`：
 - **不使用** `bypassPermissions` / `acceptEdits`，避免静默绕过弹窗。
 - 各 agent 差异：
   - Claude Code：`canUseTool`（已核实，含 `AskUserQuestion` 澄清问题也走此回调）。
-  - OpenCode：`permission` 事件（approve/deny 形状待核实）。
+  - OpenCode：`permission.asked` 事件（approve/deny 形状已核实：回传 `POST /session/{id}/permissions/{permissionID}`，body `{ response: "once" | "always" | "reject" }`，`once`/`always`=允许、`reject`=拒绝；实现走 `once`，杜绝越权自动放行）。
   - Pi：审批流程（具体形状待核实）。
 - 对不支持实时权限的 agent，降级为**每 agent 预设固定权限模式**。
 
@@ -264,7 +264,7 @@ coding-agent-manage-workspace/
 
 1. **App / package 目录名** — 待定。
 2. **删除正在运行的会话** — 是否顺带终止后端子进程，待定。
-3. **OpenCode / Pi 权限 approve/deny 的精确形状** — 实现前逐个核实。
+3. **Pi 权限 approve/deny 的精确形状** — 实现前核实（OpenCode 已核实，见 §9）。
 4. **文件树根目录的默认范围** — 建议默认 `~`，是否需额外配置。
 5. **resume 已有会话时的 name 预填** — 用原生 summary/首条提示词，可改。
 
