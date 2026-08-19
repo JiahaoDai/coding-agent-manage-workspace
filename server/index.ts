@@ -6,6 +6,7 @@ import { AdapterRegistry } from './adapters/registry';
 import { FakeAdapter } from './adapters/fake';
 import { createApp } from './app';
 import { SessionStore } from './db';
+import { createFsTree } from './fs/tree';
 import { SseHub } from './sse';
 
 const DB_PATH = process.env.DB_PATH ?? 'data/sessions.db';
@@ -24,7 +25,7 @@ for (const id of ['claude', 'opencode', 'pi']) {
   adapters.register(id, new FakeAdapter());
 }
 const sse = new SseHub();
-const app = createApp({ store, adapters, sse });
+const app = createApp({ store, adapters, sse, fs: createFsTree() });
 
 serve({ fetch: app.fetch, port: PORT }, (info) => {
   console.log(`coding-agent-dashboard server listening on http://localhost:${info.port}`);

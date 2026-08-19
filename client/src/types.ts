@@ -1,4 +1,5 @@
 // Re-export the shared contract so client components import from one place.
+export type { FsEntry } from '../../shared/fs';
 export type {
   AgentId,
   ResumableSession,

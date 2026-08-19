@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { AdapterRegistry } from './adapters/registry';
 import type { SessionStore } from './db';
+import { createFsTree, FsPathError, type FsTree } from './fs/tree';
 import { PermissionBroker } from './permission';
 import type { SseHub } from './sse';
 import type { PromptHandlers } from '../shared/adapter';
@@ -12,6 +13,8 @@ export interface AppDeps {
   store: SessionStore;
   adapters: AdapterRegistry;
   sse: SseHub;
+  /** In-app file tree for choosing a working directory. Defaults to ~ (see createFsTree). */
+  fs?: FsTree;
 }
 
 export function createApp(deps: AppDeps): Hono {
@@ -19,8 +22,23 @@ export function createApp(deps: AppDeps): Hono {
   // One broker per app instance: pending permission requests resolve back into
   // whichever turn asked, so concurrent sessions can't cross-wire answers.
   const permissions = new PermissionBroker();
+  const fs = deps.fs ?? createFsTree();
 
   app.get('/api/agents', (c) => c.json(deps.adapters.list()));
+
+  app.get('/api/fs/root', (c) => c.json({ root: fs.root, name: fs.rootName() }));
+
+  // One level of the file tree at a time (lazy). `path` is relative to the
+  // tree root; '' means the root itself.
+  app.get('/api/fs/children', (c) => {
+    const path = c.req.query('path') ?? '';
+    try {
+      return c.json({ path, entries: fs.listChildren(path) });
+    } catch (err) {
+      if (err instanceof FsPathError) return c.json({ error: err.message }, 400);
+      return c.json({ error: 'failed to list directory' }, 500);
+    }
+  });
 
   app.get('/api/sessions', (c) => c.json(deps.store.list()));
 

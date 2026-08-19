@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { serve, type ServerType } from '@hono/node-server';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
@@ -9,6 +9,7 @@ import { createApp } from './app';
 import { BaseAdapter } from './adapters/base';
 import { AdapterRegistry } from './adapters/registry';
 import { SessionStore } from './db';
+import { FsTree } from './fs/tree';
 import { SseHub } from './sse';
 import type { PromptHandlers } from '../shared/adapter';
 import type { ServerEvent } from '../shared/events';
@@ -84,14 +85,14 @@ class ScriptedAdapter extends BaseAdapter {
   }
 }
 
-async function startServer(dbPath?: string) {
-  const db = new Database(dbPath ?? ':memory:');
+async function startServer(opts?: { dbPath?: string; fs?: FsTree }) {
+  const db = new Database(opts?.dbPath ?? ':memory:');
   const store = new SessionStore(db);
   const adapters = new AdapterRegistry();
   const fake = new ScriptedAdapter();
   adapters.register('fake', fake);
   const sse = new SseHub();
-  const app = createApp({ store, adapters, sse });
+  const app = createApp({ store, adapters, sse, fs: opts?.fs });
 
   let server!: ServerType;
   await new Promise<void>((resolve) => {
@@ -220,14 +221,14 @@ describe('walking skeleton', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dash-test-'));
     const dbPath = join(dir, 'sessions.db');
     try {
-      const first = await startServer(dbPath);
+      const first = await startServer({ dbPath });
       const created = (await (
         await post(first.baseUrl, '/api/sessions', { cwd: '/tmp/p', agent: 'fake', name: 'persist me' })
       ).json()) as SessionRecord;
       first.server.close();
       first.db.close();
 
-      const second = await startServer(dbPath);
+      const second = await startServer({ dbPath });
       try {
         const list = (await (await fetch(`${second.baseUrl}/api/sessions`)).json()) as SessionRecord[];
         expect(list).toHaveLength(1);
@@ -1014,6 +1015,69 @@ describe('soft delete + re-import (ticket #6)', () => {
     } finally {
       server.close();
       db.close();
+    }
+  });
+});
+
+describe('file tree (ticket #8)', () => {
+  /** Create a temp root: two dirs, one hidden dir, one file, and a nested dir. */
+  function buildTree(): { root: FsTree; dir: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-fs-'));
+    mkdirSync(join(dir, 'zzz'));
+    mkdirSync(join(dir, 'aaa'));
+    mkdirSync(join(dir, '.hidden'));
+    mkdirSync(join(dir, 'aaa', 'inner'));
+    writeFileSync(join(dir, 'bbb.txt'), 'x');
+    return { root: new FsTree(dir), dir };
+  }
+
+  it('serves the root and lists one level, dirs first, hidden skipped', async () => {
+    const { root, dir } = buildTree();
+    const { db, server, baseUrl } = await startServer({ fs: root });
+    try {
+      const rootRes = (await (await fetch(`${baseUrl}/api/fs/root`)).json()) as {
+        root: string;
+        name: string;
+      };
+      expect(rootRes).toEqual({ root: dir, name: basename(dir) });
+
+      const level = (await (
+        await fetch(`${baseUrl}/api/fs/children?path=`)
+      ).json()) as {
+        path: string;
+        entries: Array<{ name: string; path: string; absolute: string; is_dir: boolean }>;
+      };
+      expect(level.entries).toEqual([
+        { name: 'aaa', path: 'aaa', absolute: join(dir, 'aaa'), is_dir: true },
+        { name: 'zzz', path: 'zzz', absolute: join(dir, 'zzz'), is_dir: true },
+        { name: 'bbb.txt', path: 'bbb.txt', absolute: join(dir, 'bbb.txt'), is_dir: false },
+      ]);
+
+      const sub = (await (
+        await fetch(`${baseUrl}/api/fs/children?path=${encodeURIComponent('aaa')}`)
+      ).json()) as { entries: Array<{ name: string; path: string; absolute: string; is_dir: boolean }> };
+      expect(sub.entries).toEqual([
+        { name: 'inner', path: 'aaa/inner', absolute: join(dir, 'aaa', 'inner'), is_dir: true },
+      ]);
+    } finally {
+      server.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects paths that escape the root', async () => {
+    const { root, dir } = buildTree();
+    const { db, server, baseUrl } = await startServer({ fs: root });
+    try {
+      const res = await fetch(`${baseUrl}/api/fs/children?path=${encodeURIComponent('../..')}`);
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error?: string };
+      expect(body.error).toContain('escapes');
+    } finally {
+      server.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

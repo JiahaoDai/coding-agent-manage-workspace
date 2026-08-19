@@ -4,8 +4,8 @@
 
 **Blocked by:** #1 — Walking skeleton: create & list a session (fake agent)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A file tree is served by the backend and rendered in the create form.
-- [ ] The tree is rooted at a configurable directory (default the user's home directory).
-- [ ] Selecting a directory fills the session's working directory.
+- [x] A file tree is served by the backend and rendered in the create form.
+- [x] The tree is rooted at a configurable directory (default the user's home directory).
+- [x] Selecting a directory fills the session's working directory.

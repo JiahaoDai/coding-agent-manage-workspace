@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { createSession, listNativeSessions, resumeSession } from '../api';
+import { createSession, getFsRoot, listNativeSessions, resumeSession } from '../api';
 import type { AgentId, ResumableSession, SessionRecord } from '../types';
+import { FileTree } from './FileTree';
 
 export function CreateSessionForm({
   agents,
@@ -21,8 +22,18 @@ export function CreateSessionForm({
   const [resumable, setResumable] = useState<ResumableSession[]>([]);
   // real_session_id of the session being resumed, or null for a new session.
   const [resumeTarget, setResumeTarget] = useState<string | null>(null);
+  // The file tree root (design §10): the directory is picked from the tree,
+  // never typed.
+  const [fsRoot, setFsRoot] = useState<{ root: string; name: string } | null>(null);
+  const [fsError, setFsError] = useState<string | null>(null);
 
   const canLookup = cwd.trim() !== '' && agent !== '';
+
+  useEffect(() => {
+    void getFsRoot()
+      .then(setFsRoot)
+      .catch((err) => setFsError(err instanceof Error ? err.message : String(err)));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -118,14 +129,23 @@ export function CreateSessionForm({
         </select>
       </label>
 
-      <label className="field">
+      <div className="field">
         <span className="field-label">Directory</span>
-        <input
-          value={cwd}
-          onChange={(event) => setCwd(event.target.value)}
-          placeholder="~/projects/my-app"
-        />
-      </label>
+        {fsError ? (
+          <p className="error" role="alert">
+            {fsError}
+          </p>
+        ) : fsRoot ? (
+          <>
+            <FileTree root={{ name: fsRoot.name, absolute: fsRoot.root }} onSelect={(entry) => setCwd(entry.absolute)} />
+            <p className="directory-selected" title={cwd}>
+              {cwd ? cwd : 'Click a folder to set the working directory.'}
+            </p>
+          </>
+        ) : (
+          <p className="file-node-loading">Loading…</p>
+        )}
+      </div>
 
       {canLookup && resumable.length > 0 && (
         <fieldset className="resume-options">

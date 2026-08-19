@@ -705,6 +705,115 @@ button {
   color: var(--text-secondary);
 }
 
+/* ============================================================
+   File tree (directory picker, design §10)
+   ============================================================ */
+.file-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+}
+
+.file-node {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.file-node:hover {
+  background: var(--bg-hover);
+}
+
+.file-node.is-selected {
+  background: var(--bg-hover);
+}
+
+.file-node:disabled {
+  cursor: default;
+  color: var(--text-secondary);
+}
+
+.file-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+}
+
+.file-chevron svg {
+  width: 12px;
+  height: 12px;
+  transition: transform 0.15s var(--ease);
+}
+
+.file-chevron.is-open svg {
+  transform: rotate(90deg);
+}
+
+.file-node-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+
+.file-node-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.file-node.is-dir .file-node-icon {
+  color: var(--accent);
+}
+
+.file-node-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-node-loading {
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.file-tree-error {
+  margin: 0;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  color: var(--status-error);
+}
+
+.directory-selected {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .create-form-actions {
   display: flex;
   justify-content: flex-end;

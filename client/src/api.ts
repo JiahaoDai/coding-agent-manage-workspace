@@ -1,8 +1,26 @@
-import type { AgentId, ResumableSession, SessionRecord } from './types';
+import type { AgentId, FsEntry, ResumableSession, SessionRecord } from './types';
 
 export async function listAgents(): Promise<AgentId[]> {
   const res = await fetch('/api/agents');
   return res.json();
+}
+
+/** The file tree's root directory (configurable on the server; default ~). */
+export async function getFsRoot(): Promise<{ root: string; name: string }> {
+  const res = await fetch('/api/fs/root');
+  if (!res.ok) throw new Error(`fs root failed: ${res.status}`);
+  return res.json();
+}
+
+/** One level of the file tree, relative to the root ('' = the root itself). */
+export async function listFsChildren(path: string): Promise<FsEntry[]> {
+  const res = await fetch(`/api/fs/children?path=${encodeURIComponent(path)}`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `fs children failed: ${res.status}`);
+  }
+  const body = (await res.json()) as { entries: FsEntry[] };
+  return body.entries;
 }
 
 export async function listSessions(): Promise<SessionRecord[]> {
