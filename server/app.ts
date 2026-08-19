@@ -85,6 +85,21 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ ok: true });
   });
 
+  // Read a session's message history from the agent's native store at display
+  // time (design §4: bodies never live in SQLite). The client calls this when a
+  // session is selected, so a refresh repopulates the view from the native store.
+  app.get('/api/sessions/:id/messages', async (c) => {
+    const session_id = c.req.param('id');
+    const session = deps.store.get(session_id);
+    if (!session) return c.json({ error: 'session not found' }, 404);
+
+    const adapter = deps.adapters.get(session.coding_agent);
+    if (!adapter) return c.json({ error: `unknown agent: ${session.coding_agent}` }, 400);
+
+    const messages = await adapter.getMessages(session.real_session_id, session.cwd);
+    return c.json(messages);
+  });
+
   // Native sessions a folder already has for an agent, minus the ones the app is
   // tracking. These are the resume candidates: soft-deleted sessions still live
   // in the agent's store under the same cwd, and so do sessions created outside

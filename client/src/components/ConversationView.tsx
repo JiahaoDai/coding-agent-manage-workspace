@@ -65,10 +65,16 @@ export function ConversationView({
   session,
   messages,
   onSend,
+  loading = false,
+  error = null,
 }: {
   session: SessionRecord;
   messages: ConversationMessage[];
   onSend: (text: string) => void;
+  /** True while the session's history is being fetched from its native store. */
+  loading?: boolean;
+  /** Error from loading the session's history, when there is one. */
+  error?: string | null;
 }) {
   const [draft, setDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -112,7 +118,11 @@ export function ConversationView({
       </header>
 
       <div className="conversation-messages" ref={scrollRef} aria-live="polite">
-        {messages.length === 0 ? (
+        {loading && messages.length === 0 ? (
+          <p className="conversation-empty">Loading conversation…</p>
+        ) : error && messages.length === 0 ? (
+          <p className="conversation-empty">Failed to load history: {error}</p>
+        ) : messages.length === 0 ? (
           <p className="conversation-empty">Send a message to start the conversation.</p>
         ) : (
           messages.map((message, index) => <Message key={index} message={message} />)

@@ -1,4 +1,4 @@
-import type { AgentId, FsEntry, ResumableSession, SessionRecord } from './types';
+import type { AgentId, FsEntry, Message, ResumableSession, SessionRecord } from './types';
 
 export async function listAgents(): Promise<AgentId[]> {
   const res = await fetch('/api/agents');
@@ -56,6 +56,16 @@ export async function sendMessage(sessionId: string, text: string): Promise<void
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
     throw new Error(body?.error ?? `send failed: ${res.status}`);
   }
+}
+
+/** A session's message history, read from the agent's native store at display time. */
+export async function getSessionMessages(sessionId: string): Promise<Message[]> {
+  const res = await fetch(`/api/sessions/${sessionId}/messages`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `messages failed: ${res.status}`);
+  }
+  return res.json();
 }
 
 /** Soft-delete a session: removes the app's record; the agent's native session stays intact. */

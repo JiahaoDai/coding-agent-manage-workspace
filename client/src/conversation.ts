@@ -1,4 +1,4 @@
-import type { ServerEvent } from './types';
+import type { Message, ServerEvent } from './types';
 
 /**
  * Pure conversation-state logic: how user messages and streamed agent events
@@ -35,6 +35,24 @@ export type StreamableServerEvent =
   | Extract<ServerEvent, { type: 'tool_call_start' }>
   | Extract<ServerEvent, { type: 'tool_call_end' }>
   | Extract<ServerEvent, { type: 'error' }>;
+
+/**
+ * Fold messages read from the agent's native store (adapter `getMessages`) into
+ * the display model. History carries text only — tool calls and thinking stream
+ * live, they are not replayed as text.
+ */
+export function messagesToConversation(messages: Message[]): ConversationMessage[] {
+  return messages.map((m) => {
+    switch (m.role) {
+      case 'user':
+        return { kind: 'user', text: m.content };
+      case 'assistant':
+        return { kind: 'assistant', parts: [{ kind: 'text', text: m.content }] };
+      case 'system':
+        return { kind: 'system', text: m.content };
+    }
+  });
+}
 
 export function toStreamEvent(event: StreamableServerEvent): StreamEvent {
   switch (event.type) {

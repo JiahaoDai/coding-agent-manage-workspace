@@ -15,7 +15,7 @@ export abstract class BaseAdapter implements AgentAdapter {
     return [];
   }
 
-  async getMessages(): Promise<Message[]> {
+  async getMessages(_real_session_id: string, _cwd: string): Promise<Message[]> {
     return [];
   }
 

@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import { serve } from '@hono/node-server';
 import Database from 'better-sqlite3';
 import { AdapterRegistry } from './adapters/registry';
+import { ClaudeAdapter } from './adapters/claude';
 import { FakeAdapter } from './adapters/fake';
 import { createApp } from './app';
 import { SessionStore } from './db';
@@ -19,9 +20,10 @@ if (DB_PATH !== ':memory:') {
 const db = new Database(DB_PATH);
 const store = new SessionStore(db);
 const adapters = new AdapterRegistry();
-// Until the real adapters (tickets #9–#11) land, every known agent is driven
-// by the fake adapter so the app works end-to-end.
-for (const id of ['claude', 'opencode', 'pi']) {
+// Claude Code is real (ticket #9); the remaining agents stay on the fake
+// adapter until their adapters land (tickets #10–#11).
+adapters.register('claude', new ClaudeAdapter());
+for (const id of ['opencode', 'pi']) {
   adapters.register(id, new FakeAdapter());
 }
 const sse = new SseHub();

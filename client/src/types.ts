@@ -2,6 +2,7 @@
 export type { FsEntry } from '../../shared/fs';
 export type {
   AgentId,
+  Message,
   ResumableSession,
   SessionRecord,
   SessionStatus,

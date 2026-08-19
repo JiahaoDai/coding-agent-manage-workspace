@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { deleteSession, listAgents, listSessions, respondPermission, sendMessage } from './api';
+import { useEffect, useRef, useState } from 'react';
+import { deleteSession, getSessionMessages, listAgents, listSessions, respondPermission, sendMessage } from './api';
 import { ConversationView } from './components/ConversationView';
 import { CreateSessionForm } from './components/CreateSessionForm';
 import { EmptyState } from './components/EmptyState';
@@ -8,6 +8,7 @@ import { Sidebar } from './components/Sidebar';
 import {
   applyStreamEvent,
   applyUserMessage,
+  messagesToConversation,
   toStreamEvent,
   type ConversationMessage,
   type StreamableServerEvent,
@@ -31,6 +32,11 @@ export function App() {
   // Outstanding permission requests, oldest first, across all sessions. The
   // modal shows the first; the rest queue behind it.
   const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
+  // Per-session status of the initial history fetch. Requested once per session
+  // per mount (ref), so re-selecting an already-loaded session doesn't refetch,
+  // while a failed fetch can be retried on the next select.
+  const requestedHistory = useRef<Set<string>>(new Set());
+  const [historyStatus, setHistoryStatus] = useState<Record<string, { loading: boolean; error?: string }>>({});
 
   /**
    * A request id is only unique within a session (agents reuse per-turn
@@ -103,6 +109,38 @@ export function App() {
     return () => source.close();
   }, []);
 
+  // Load a session's history from its native store when it is selected.
+  // Message bodies live in the agent's store, never in SQLite (design §4), so
+  // after a refresh the view starts empty and this repopulates it. The guard
+  // keeps it once-per-session; live streamed turns still append on top.
+  useEffect(() => {
+    const id = selectedId;
+    if (!id || requestedHistory.current.has(id)) return;
+    requestedHistory.current.add(id);
+    setHistoryStatus((prev) => ({ ...prev, [id]: { loading: true } }));
+    getSessionMessages(id)
+      .then((messages) => {
+        setConversations((prev) =>
+          // Never clobber a live conversation (a message just sent, or a turn
+          // streaming in); only fill the empty view.
+          prev[id] && prev[id].length > 0
+            ? prev
+            : messages.length
+              ? { ...prev, [id]: messagesToConversation(messages) }
+              : prev,
+        );
+        setHistoryStatus((prev) => ({ ...prev, [id]: { loading: false } }));
+      })
+      .catch((err) => {
+        // Allow a retry on the next select.
+        requestedHistory.current.delete(id);
+        setHistoryStatus((prev) => ({
+          ...prev,
+          [id]: { loading: false, error: err instanceof Error ? err.message : String(err) },
+        }));
+      });
+  }, [selectedId]);
+
   async function handleSend(session: SessionRecord, text: string) {
     const id = session.session_id;
     setConversations((prev) => ({ ...prev, [id]: applyUserMessage(prev[id] ?? [], text) }));
@@ -166,6 +204,7 @@ export function App() {
   }
 
   const selected = sessions.find((s) => s.session_id === selectedId) ?? null;
+  const selectedHistory = selectedId ? historyStatus[selectedId] : undefined;
   const pendingPermission = permissionQueue[0] ?? null;
   const pendingSession = pendingPermission
     ? sessions.find((s) => s.session_id === pendingPermission.session_id)
@@ -200,6 +239,8 @@ export function App() {
             session={selected}
             messages={conversations[selected.session_id] ?? []}
             onSend={(text) => void handleSend(selected, text)}
+            loading={selectedHistory?.loading}
+            error={selectedHistory?.error}
           />
         ) : (
           <EmptyState onNewSession={() => setCreating(true)} />

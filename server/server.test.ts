@@ -13,7 +13,7 @@ import { FsTree } from './fs/tree';
 import { SseHub } from './sse';
 import type { PromptHandlers } from '../shared/adapter';
 import type { ServerEvent } from '../shared/events';
-import type { SessionRecord, SessionStatus } from '../shared/session';
+import type { Message, SessionRecord, SessionStatus } from '../shared/session';
 
 /** Context a script sees for the prompt it is driving. */
 interface PromptContext {
@@ -48,6 +48,13 @@ class ScriptedAdapter extends BaseAdapter {
 
   /** Native sessions the server asked to open/resume, in call order. */
   readonly openCalls: Array<{ real_session_id: string; cwd: string }> = [];
+
+  /** Messages served for any session — history read at display time. */
+  scriptedMessages: Message[] = [];
+
+  async getMessages(_real_session_id: string, _cwd: string): Promise<Message[]> {
+    return this.scriptedMessages;
+  }
 
   async createSession(cwd: string, opts?: { name?: string }): Promise<{ real_session_id: string }> {
     this.created.push(cwd);
@@ -1012,6 +1019,41 @@ describe('soft delete + re-import (ticket #6)', () => {
         `${baseUrl}/api/sessions/native?cwd=/tmp/x&agent=unknown`,
       );
       expect(nativeBadAgent.status).toBe(400);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+});
+
+describe('session history (ticket #13)', () => {
+  it('serves a session\'s messages read from the native store at display time', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.scriptedMessages = [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+      ];
+      const created = await createSession(baseUrl, 'history');
+
+      const res = await fetch(`${baseUrl}/api/sessions/${created.session_id}/messages`);
+      expect(res.status).toBe(200);
+      const messages = (await res.json()) as Message[];
+      expect(messages).toEqual([
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+      ]);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('404s for a missing session', async () => {
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const res = await fetch(`${baseUrl}/api/sessions/does-not-exist/messages`);
+      expect(res.status).toBe(404);
     } finally {
       server.close();
       db.close();

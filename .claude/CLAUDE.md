@@ -13,3 +13,6 @@ before you act, you must obey the `docs/design.md`
 
 ### UI design
 reference chatgpt UI design.
+
+### api_key
+api_key is store in `.env`,only use for test claude code adapter
