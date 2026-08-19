@@ -214,6 +214,7 @@ export function createApp(deps: AppDeps): Hono {
       onToolCallEnd: (tool_call_id) =>
         deps.sse.broadcast({ type: 'tool_call_end', session_id, tool_call_id }),
       onThinkingDelta: (delta) => deps.sse.broadcast({ type: 'thinking_delta', session_id, text: delta }),
+      onStatusNote: (text) => deps.sse.broadcast({ type: 'status_note', session_id, text }),
       onStatusChange: (status) => {
         // The server sets `running` at turn start, so an adapter reporting the
         // same status again must not double-write or double-broadcast.

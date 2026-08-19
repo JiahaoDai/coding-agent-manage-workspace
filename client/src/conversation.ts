@@ -27,6 +27,7 @@ export type StreamEvent =
   | { type: 'thinking_delta'; text: string }
   | { type: 'tool_call_start'; tool_call_id: string; name: string; input: unknown }
   | { type: 'tool_call_end'; tool_call_id: string }
+  | { type: 'status_note'; text: string }
   | { type: 'error'; message: string };
 
 export type StreamableServerEvent =
@@ -34,6 +35,7 @@ export type StreamableServerEvent =
   | Extract<ServerEvent, { type: 'thinking_delta' }>
   | Extract<ServerEvent, { type: 'tool_call_start' }>
   | Extract<ServerEvent, { type: 'tool_call_end' }>
+  | Extract<ServerEvent, { type: 'status_note' }>
   | Extract<ServerEvent, { type: 'error' }>;
 
 /**
@@ -69,6 +71,8 @@ export function toStreamEvent(event: StreamableServerEvent): StreamEvent {
       };
     case 'tool_call_end':
       return { type: 'tool_call_end', tool_call_id: event.tool_call_id };
+    case 'status_note':
+      return { type: 'status_note', text: event.text };
     case 'error':
       return { type: 'error', message: event.message };
   }
@@ -139,8 +143,9 @@ export function applyStreamEvent(
           : message,
       );
 
+    case 'status_note':
     case 'error':
-      return [...messages, { kind: 'system', text: event.message }];
+      return [...messages, { kind: 'system', text: event.type === 'status_note' ? event.text : event.message }];
   }
 }
 

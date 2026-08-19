@@ -79,6 +79,7 @@ export function App() {
         case 'thinking_delta':
         case 'tool_call_start':
         case 'tool_call_end':
+        case 'status_note':
         case 'error': {
           const sid = event.session_id;
           if (sid) {

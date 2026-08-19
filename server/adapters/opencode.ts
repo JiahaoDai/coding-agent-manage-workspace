@@ -79,8 +79,17 @@ export type OpencodeEvent =
   | { type: 'permission.asked'; properties: OpencodePermission }
   | { type: 'permission.v2.asked'; properties: OpencodePermissionV2 }
   | { type: 'session.idle'; properties: { sessionID: string } }
-  | { type: 'session.status'; properties: { sessionID: string; status: { type: string } } }
+  | {
+      type: 'session.status';
+      properties: { sessionID: string; status: OpencodeSessionStatus };
+    }
   | { type: 'session.error'; properties: { sessionID?: string; error?: OpencodeError } };
+
+/** Lifecycle state of a session, as the server reports it. */
+export type OpencodeSessionStatus =
+  | { type: 'idle' }
+  | { type: 'busy' }
+  | { type: 'retry'; attempt: number; message: string; next: number };
 
 /** A pending v1 permission request (a tool wants to run an action). */
 export interface OpencodePermission {
@@ -229,6 +238,8 @@ export class OpenCodeAdapter extends BaseAdapter {
   constructor(
     private readonly sdk: OpencodeSdk = createOpencodeSdk(),
     private readonly quiescenceMs = 5000,
+    /** Fail the turn after this many seconds with no text/thinking/tool activity. */
+    private readonly stallMs = 60000,
   ) {
     super();
   }
@@ -269,10 +280,11 @@ export class OpenCodeAdapter extends BaseAdapter {
     const state: OpencodeEventState = { startedToolParts: new Set() };
 
     // `settled` resolves when the turn is done (session.idle, or the stream
-    // ending) and rejects when the consumer crashes (e.g. session.error) — so
-    // a failure always surfaces as a failed turn rather than an unhandled
-    // rejection. A short quiescence race guards against a server that never
-    // emits idle; the timer is cleared when the turn ends.
+    // ending), rejects when the consumer crashes (e.g. session.error), and
+    // rejects via the stall timer when the server stops making progress (e.g.
+    // a provider rate-limit retry loop) — so a turn always ends with either a
+    // reply or a clear error, never a silent hang. A short quiescence race
+    // guards against a server that never emits idle.
     let signalIdle: () => void = () => {};
     let failTurn: (err: unknown) => void = () => {};
     const turnDone = new Promise<void>((resolve, reject) => {
@@ -283,32 +295,69 @@ export class OpenCodeAdapter extends BaseAdapter {
     const quiescence = new Promise<void>((resolve) => {
       quiescenceTimer = setTimeout(resolve, this.quiescenceMs);
     });
-    const settled = Promise.race([turnDone, quiescence]);
+
+    // Progress keeps the turn alive; retry statuses (the server telling us
+    // it's rate-limited and backing off) do NOT count, so a turn that only
+    // emits retries for `stallMs` fails with the last status surfaced to the
+    // user. Paused while awaiting a permission decision — the user's think
+    // time is not a stall.
+    let lastActivity = Date.now();
+    let lastNote: string | undefined;
+    let holdingStall = false;
+    let stallTimer: ReturnType<typeof setInterval> | undefined;
+    const stalled = new Promise<never>((_, reject) => {
+      stallTimer = setInterval(() => {
+        if (holdingStall) return;
+        if (Date.now() - lastActivity > this.stallMs) {
+          reject(new Error(opencodeStallMessage(this.stallMs, lastNote)));
+        }
+      }, 1000);
+    });
+    const settled = Promise.race([turnDone, quiescence, stalled]);
 
     void (async () => {
       try {
         for await (const event of events) {
-          if (event.type === 'session.error' && (event.properties.sessionID ?? '') === real_session_id) {
+          if (eventSessionID(event) !== real_session_id) continue;
+          if (isProgress(event)) lastActivity = Date.now();
+
+          if (event.type === 'session.error') {
             throw new Error(opencodeErrorDetail(event.properties.error));
           }
-          if (event.type === 'session.idle' && event.properties.sessionID === real_session_id) {
+          if (event.type === 'session.idle') {
             signalIdle();
             continue;
           }
-          if (
-            event.type === 'session.status' &&
-            event.properties.sessionID === real_session_id &&
-            event.properties.status.type === 'idle'
-          ) {
-            signalIdle();
+          if (event.type === 'session.status') {
+            const status = event.properties.status;
+            if (status.type === 'idle') {
+              signalIdle();
+            } else if (status.type === 'retry') {
+              // Surface the retry so the user sees why there's no reply yet
+              // instead of a silent wait.
+              lastNote = status.message;
+              handlers.onStatusNote(`OpenCode retrying (attempt ${status.attempt}): ${status.message}`);
+            }
             continue;
           }
-          if (event.type === 'permission.asked' && event.properties.sessionID === real_session_id) {
-            await this.answerPermission(event.properties, handlers);
+          if (event.type === 'permission.asked') {
+            holdingStall = true;
+            try {
+              await this.answerPermission(event.properties, handlers);
+            } finally {
+              holdingStall = false;
+            }
+            lastActivity = Date.now();
             continue;
           }
-          if (event.type === 'permission.v2.asked' && event.properties.sessionID === real_session_id) {
-            await this.answerPermissionV2(event.properties, handlers);
+          if (event.type === 'permission.v2.asked') {
+            holdingStall = true;
+            try {
+              await this.answerPermissionV2(event.properties, handlers);
+            } finally {
+              holdingStall = false;
+            }
+            lastActivity = Date.now();
             continue;
           }
           mapOpencodeEvent(event, real_session_id, handlers, state);
@@ -324,9 +373,14 @@ export class OpenCodeAdapter extends BaseAdapter {
 
     const reply = this.sdk.prompt(real_session_id, cwd, input);
     try {
-      await Promise.all([reply, settled]);
+      // The turn ends when the prompt reply and the event stream both settle
+      // (reply resolves + idle/quiescence/stream-end). The stall timer races
+      // that whole completion so a hung prompt POST — the rate-limit retry
+      // loop never resolves it — still fails the turn instead of hanging it.
+      await Promise.race([Promise.all([reply, settled]), stalled]);
     } finally {
       clearTimeout(quiescenceTimer);
+      clearInterval(stallTimer);
       // Release the SSE subscription now that the turn is over (resolve or
       // error) so the connection doesn't outlive the prompt it served. A
       // failure here must not mask the turn's real outcome.
@@ -418,6 +472,40 @@ export function opencodeErrorDetail(error?: OpencodeError): string {
   return message
     ? `${error.name ?? 'OpenCode error'}: ${message}`
     : (error.name ?? 'OpenCode turn ended with an error');
+}
+
+/** Human-readable detail for a stalled (no-progress) turn. */
+export function opencodeStallMessage(stallMs: number, lastNote?: string): string {
+  const base = `OpenCode turn stalled — no output for ${Math.round(stallMs / 1000)}s`;
+  return lastNote ? `${base} (last status: ${lastNote})` : base;
+}
+
+/** The session an event belongs to, for scoping a turn's event consumption. */
+function eventSessionID(event: OpencodeEvent): string | undefined {
+  switch (event.type) {
+    case 'message.part.delta':
+    case 'message.part.updated':
+    case 'permission.asked':
+    case 'permission.v2.asked':
+    case 'session.idle':
+    case 'session.status':
+    case 'session.error':
+      return event.properties.sessionID;
+  }
+}
+
+/** Events that count as the turn making progress (reset the stall timer). */
+function isProgress(event: OpencodeEvent): boolean {
+  switch (event.type) {
+    case 'message.part.delta':
+    case 'message.part.updated':
+    case 'permission.asked':
+    case 'permission.v2.asked':
+    case 'session.idle':
+      return true;
+    default:
+      return false;
+  }
 }
 
 /**

@@ -35,6 +35,12 @@ export interface PromptHandlers {
   onToolCallStart(tool_call_id: string, name: string, input: unknown): void;
   onToolCallEnd(tool_call_id: string): void;
   onThinkingDelta(text: string): void;
+  /**
+   * Transient progress note from the agent (e.g. OpenCode's rate-limit retry
+   * status). Shown to the user as a system message so a turn that isn't
+   * producing output still communicates why.
+   */
+  onStatusNote(text: string): void;
   onStatusChange(status: SessionStatus): void;
   /**
    * Interactive permission confirmation. Called when the agent wants to run a

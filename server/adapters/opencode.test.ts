@@ -58,6 +58,20 @@ function idle(sessionID = 'ses-1'): OpencodeEvent {
   return { type: 'session.idle', properties: { sessionID } };
 }
 
+function retryStatus(attempt: number, message: string): OpencodeEvent {
+  return {
+    type: 'session.status',
+    properties: { sessionID: 'ses-1', status: { type: 'retry', attempt, message, next: 1000 } },
+  };
+}
+
+function busyStatus(): OpencodeEvent {
+  return {
+    type: 'session.status',
+    properties: { sessionID: 'ses-1', status: { type: 'busy' } },
+  };
+}
+
 function sessionError(message = 'boom'): OpencodeEvent {
   return {
     type: 'session.error',
@@ -108,6 +122,7 @@ function spyHandlers(decision: 'allow' | 'deny' = 'allow') {
     onToolCallStart: vi.fn(),
     onToolCallEnd: vi.fn(),
     onThinkingDelta: vi.fn(),
+    onStatusNote: vi.fn(),
     onStatusChange: vi.fn(),
     onPermissionRequest: vi.fn(async () => decision),
   } satisfies PromptHandlers & {
@@ -209,6 +224,8 @@ describe('opencodeErrorDetail', () => {
 function makeSdk(opts: {
   events?: OpencodeEvent[];
   promptError?: Error;
+  /** If true, prompt never resolves (e.g. the server's POST hangs in a retry loop). */
+  hangPrompt?: boolean;
   sessions?: OpencodeNativeSession[];
   transcript?: OpencodeTranscriptEntry[];
 } = {}) {
@@ -234,6 +251,7 @@ function makeSdk(opts: {
     },
     async prompt(sessionID, cwd, input) {
       promptCalls.push({ sessionID, cwd, input });
+      if (opts.hangPrompt) return new Promise<never>(() => {});
       if (opts.promptError) throw opts.promptError;
       return { info: { id: 'msg-1', sessionID, role: 'assistant' }, parts: [] };
     },
@@ -405,5 +423,75 @@ describe('OpenCodeAdapter', () => {
 
     expect(handlers.onTextDelta).not.toHaveBeenCalled();
     expect(handlers.onStatusChange).toHaveBeenCalledWith('completed');
+  });
+
+  it('surfaces rate-limit retries as a status note instead of silence', async () => {
+    const { sdk } = makeSdk({
+      events: [busyStatus(), retryStatus(1, 'Free usage exceeded, subscribe to Go'), textDelta('ok'), idle()],
+    });
+    const adapter = new OpenCodeAdapter(sdk);
+    const handlers = spyHandlers();
+
+    await adapter.prompt('ses-1', '/tmp/p', 'hi', handlers);
+
+    expect(handlers.onStatusNote).toHaveBeenCalledWith(
+      'OpenCode retrying (attempt 1): Free usage exceeded, subscribe to Go',
+    );
+    expect(handlers.onTextDelta).toHaveBeenCalledWith('ok');
+    expect(handlers.onStatusChange).toHaveBeenCalledWith('completed');
+  });
+
+  it('fails a turn that only retries without progress', async () => {
+    vi.useFakeTimers();
+    try {
+      const { sdk } = makeSdk({
+        events: [retryStatus(1, 'Free usage exceeded'), retryStatus(2, 'Free usage exceeded')],
+        hangPrompt: true,
+      });
+      const adapter = new OpenCodeAdapter(sdk, 5000, 30000);
+      const handlers = spyHandlers();
+
+      const turn = adapter.prompt('ses-1', '/tmp/p', 'hi', handlers);
+      // Attach the rejection assertion before advancing timers so the stall
+      // rejection is handled as soon as it fires, not a tick later.
+      const assertion = expect(turn).rejects.toThrow(
+        'OpenCode turn stalled — no output for 30s (last status: Free usage exceeded)',
+      );
+      await vi.advanceTimersByTimeAsync(31000);
+
+      await assertion;
+      expect(handlers.onStatusNote).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not stall while a permission decision is pending', async () => {
+    vi.useFakeTimers();
+    try {
+      const { sdk } = makeSdk({ events: [permissionAsked()], hangPrompt: true });
+      const adapter = new OpenCodeAdapter(sdk, 5000, 30000);
+      let resolveDecision!: (decision: 'allow' | 'deny') => void;
+      const decision = new Promise<'allow' | 'deny'>((resolve) => (resolveDecision = resolve));
+      const handlers = spyHandlers();
+      handlers.onPermissionRequest = vi.fn(() => decision);
+
+      const turn = adapter.prompt('ses-1', '/tmp/p', 'hi', handlers);
+      let failed = false;
+      turn.catch(() => (failed = true));
+
+      // Past the stall window while the user is deciding: the turn must not
+      // have failed.
+      await vi.advanceTimersByTimeAsync(40000);
+      expect(failed).toBe(false);
+
+      resolveDecision('allow');
+      // Still waiting on the hung prompt POST, but not because of a stall:
+      // the stall timer resumed from the answer, so this window is short.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(failed).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

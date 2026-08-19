@@ -65,6 +65,7 @@ function spyHandlers(decision: 'allow' | 'deny' = 'allow') {
     onToolCallStart: vi.fn(),
     onToolCallEnd: vi.fn(),
     onThinkingDelta: vi.fn(),
+    onStatusNote: vi.fn(),
     onStatusChange: vi.fn(),
     onPermissionRequest: vi.fn(async () => decision),
   } satisfies PromptHandlers & {
