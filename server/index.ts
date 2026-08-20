@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import { AdapterRegistry } from './adapters/registry';
 import { ClaudeAdapter } from './adapters/claude';
 import { FakeAdapter } from './adapters/fake';
-import { OpenCodeAdapter } from './adapters/opencode';
+import { createOpencodeSdk, OpenCodeAdapter } from './adapters/opencode';
 import { createApp } from './app';
 import { SessionStore } from './db';
 import { createFsTree } from './fs/tree';
@@ -23,8 +23,12 @@ const store = new SessionStore(db);
 const adapters = new AdapterRegistry();
 // Claude Code (ticket #9) and OpenCode (ticket #10) are real; Pi stays on the
 // fake adapter until its adapter lands (ticket #11).
+//
+// OpenCode's spawned server defaults to the `deepseek-v4-flash` model (a
+// configured hpc-ai provider, reference `deepseek/deepseek-v4-flash`) so
+// sessions use it instead of the rate-limited default. Override via OPENCODE_MODEL.
 adapters.register('claude', new ClaudeAdapter());
-adapters.register('opencode', new OpenCodeAdapter());
+adapters.register('opencode', new OpenCodeAdapter(createOpencodeSdk({ model: process.env.OPENCODE_MODEL ?? 'deepseek/deepseek-v4-flash' })));
 adapters.register('pi', new FakeAdapter());
 const sse = new SseHub();
 const app = createApp({ store, adapters, sse, fs: createFsTree() });

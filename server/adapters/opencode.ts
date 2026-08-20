@@ -147,8 +147,14 @@ export interface OpencodeEventState {
  * The real client, bound once at module load. Lazily ensures an OpenCode server
  * is reachable on first use: an explicitly managed server via `OPENCODE_URL`,
  * or a headless `opencode serve` spawned by `createOpencodeServer`.
+ *
+ * `model` sets the spawned server's default model (the opencode reference, e.g.
+ * `deepseek/deepseek-v4-flash`), so new sessions use it instead of whatever the
+ * server would pick on its own. Falls back to `OPENCODE_MODEL`, then to no
+ * override (the server's own default).
  */
-export function createOpencodeSdk(): OpencodeSdk {
+export function createOpencodeSdk(config: { model?: string } = {}): OpencodeSdk {
+  const model = config.model ?? process.env.OPENCODE_MODEL;
   let client: OpencodeClient | undefined;
   let server: { url: string; close(): void } | undefined;
 
@@ -158,7 +164,7 @@ export function createOpencodeSdk(): OpencodeSdk {
     if (url) {
       client = createOpencodeClient({ baseUrl: url, throwOnError: true });
     } else {
-      server = await createOpencodeServer();
+      server = await createOpencodeServer(model ? { config: { model } } : undefined);
       client = createOpencodeClient({ baseUrl: server.url, throwOnError: true });
     }
     return client;
