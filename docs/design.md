@@ -65,7 +65,7 @@
 | 列出会话 | `listSessions({ dir })` | `session.list()` | `SessionManager.list(cwd)` / `listAll` |
 | 读历史消息 | `getSessionMessages(id, { dir })` | `session.messages({ id })` | `session.messages` |
 | 恢复/继续 | ✅ `resume` / `continue` / `forkSession` | ✅ 无原生 resume；同一 id 再 `prompt`（re-prompt，已核实） | ✅ `continueRecent` / `open` / `fork` / `clone` |
-| 权限交互 | ✅ `canUseTool` 回调（async，可挂起等待） | ✅ `permission.asked` 事件 + `POST /session/{id}/permissions/{permissionID}`，body `{ response: "once" \| "always" \| "reject" }`（已核实） | ⚠️ 审批流程（具体形状待核实） |
+| 权限交互 | ✅ `canUseTool` 回调（async，可挂起等待） | ✅ `permission.asked` 事件 + `POST /session/{id}/permissions/{permissionID}`，body `{ response: "once" \| "always" \| "reject" }`（已核实） | ✅ `tool_call` 扩展拦截 + `{ block }` 结果（已核实，见 §9） |
 
 **关键差异（影响设计）：**
 
@@ -209,7 +209,7 @@ SQLite 数据库，核心表 `session`：
 - 各 agent 差异：
   - Claude Code：`canUseTool`（已核实，含 `AskUserQuestion` 澄清问题也走此回调）。
   - OpenCode：`permission.asked` 事件（approve/deny 形状已核实：回传 `POST /session/{id}/permissions/{permissionID}`，body `{ response: "once" | "always" | "reject" }`，`once`/`always`=允许、`reject`=拒绝；实现走 `once`，杜绝越权自动放行）。
-  - Pi：审批流程（具体形状待核实）。
+  - Pi：**无原生权限模式**（没有 `canUseTool`，也没有 `permission.asked` 事件）。审批走**扩展**：inline 扩展监听 `tool_call` 事件（工具执行前触发），返回 `undefined` 放行、`{ block: true, reason }` 阻断（阻断后 agent 收到该工具的错误结果并自行调整）。是否询问由扩展内 resolver 决定，resolver 指向界面的 `onPermissionRequest`（ticket #11 已核实）。默认对副作用工具 `bash`/`write`/`edit` 询问，只读工具（`read`/`grep`/`find`/`ls`）自动放行，与 Claude Code 默认权限集一致。
 - 对不支持实时权限的 agent，降级为**每 agent 预设固定权限模式**。
 
 ---
@@ -264,7 +264,7 @@ coding-agent-manage-workspace/
 
 1. **App / package 目录名** — 待定。
 2. **删除正在运行的会话** — 是否顺带终止后端子进程，待定。
-3. **Pi 权限 approve/deny 的精确形状** — 实现前核实（OpenCode 已核实，见 §9）。
+3. **Pi 权限 approve/deny 的精确形状** — ✅ 已核实（ticket #11）：Pi 无原生权限模式，审批走 `tool_call` 扩展 + `{ block }` 结果，resolver 对接界面 `onPermissionRequest`。见 §9。
 4. **文件树根目录的默认范围** — 建议默认 `~`，是否需额外配置。
 5. **resume 已有会话时的 name 预填** — 用原生 summary/首条提示词，可改。
 

@@ -1,19 +1,6 @@
 ## claude code
 ### /command命令问题
 
-**What to build:** Slash commands typed into the composer run their real effect instead of being sent to the model as literal text. `/model <name>` switches the session's model for subsequent turns. Commands the headless SDK can't honour answer with a clear session-local message rather than being silently passed through.
-
-**Blocked by:** #9 — Claude Code adapter
-
-**Status:** ready-for-agent
-
-- [ ] A message starting with `/` is intercepted at the adapter before it reaches the model as text.
-- [ ] `/model <name>` switches the session's model (via `Options.model`) and sticks for later turns; bare `/model` lists the available models.
-- [ ] Slash commands with no headless equivalent answer with a clear message instead of being sent to the model as text.
-- [ ] Each supported and unsupported command is documented so the behaviour is discover
-
-模型选择
-
 ### 终端交互 !xxx无法直接执行命令
 
 ### markdown展示存在问题
@@ -30,7 +17,5 @@
 
 
 ### 输入query之后，在相应第一个流来之前，显示一个正在处理的图标绿泡泡
-
-
 
 ### 记录最后的报错信息。（表结构修改）
