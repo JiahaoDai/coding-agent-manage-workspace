@@ -12,6 +12,8 @@
 - [ ] Slash commands with no headless equivalent answer with a clear message instead of being sent to the model as text.
 - [ ] Each supported and unsupported command is documented so the behaviour is discover
 
+模型选择
+
 ### 终端交互 !xxx无法直接执行命令
 
 ### markdown展示存在问题
@@ -21,4 +23,10 @@
 ### 历史会话加载
 
 
-创建session的UI问题，找不到确认按钮了
+### 创建session的UI问题，找不到确认按钮了
+
+
+### 输入会话的时候，打字选择拼音回车直接就发送了；shift+enter换行
+
+
+### 输入query之后，在相应第一个流来之前，显示一个正在处理的图标绿泡泡
