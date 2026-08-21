@@ -4,7 +4,7 @@
 
 **Blocked by:** #03 — Expand adapter capabilities for v2 operations.
 
-**Status:** ready-for-agent
+**Status:** cancelled — TUI-local slash commands cannot preserve their native per-session semantics through the headless SDK runtimes.
 
 - [ ] Typing the slash-command prefix exposes commands currently supported by the selected coding agent with concise descriptions.
 - [ ] Selecting and submitting a native command dispatches it through the agent's native command mechanism, not as a normal prompt.

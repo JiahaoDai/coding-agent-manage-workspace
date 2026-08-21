@@ -4,7 +4,7 @@
 
 **Blocked by:** #03 — Expand adapter capabilities for v2 operations.
 
-**Status:** ready-for-agent
+**Status:** cancelled — TUI-local slash commands cannot preserve their native per-session semantics through the headless SDK runtimes.
 
 - [ ] A composer entry beginning with `!` executes in the dashboard session working directory without an agent permission dialog.
 - [ ] Command results show stdout, stderr, and exit status as a dedicated conversation result block.

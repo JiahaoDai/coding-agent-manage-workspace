@@ -101,6 +101,7 @@ class ScriptedAdapter extends BaseAdapter {
     this.modelSetCalls.push({ real_session_id, model_id });
     return { supported: true as const, value: undefined };
   }
+
 }
 
 async function startServer(opts?: { dbPath?: string; fs?: FsTree }) {

@@ -325,6 +325,23 @@ export class OpenCodeAdapter extends BaseAdapter {
     input: string,
     handlers: PromptHandlers,
   ): Promise<void> {
+    const selected = this.selectedModels.get(real_session_id);
+    const [providerID, modelID] = selected?.split('/', 2) ?? [];
+    await this.runWithEvents(
+      real_session_id,
+      cwd,
+      handlers,
+      () => this.sdk.prompt(real_session_id, cwd, input, providerID && modelID ? { providerID, modelID } : undefined),
+    );
+  }
+
+  /** Run an OpenCode operation while forwarding its shared SSE lifecycle. */
+  private async runWithEvents(
+    real_session_id: string,
+    cwd: string,
+    handlers: PromptHandlers,
+    invoke: () => Promise<unknown>,
+  ): Promise<void> {
     const events = await this.sdk.subscribe(cwd);
     const state: OpencodeEventState = { startedToolParts: new Set() };
 
@@ -420,15 +437,14 @@ export class OpenCodeAdapter extends BaseAdapter {
       }
     })();
 
-    const selected = this.selectedModels.get(real_session_id);
-    const [providerID, modelID] = selected?.split('/', 2) ?? [];
-    const reply = this.sdk.prompt(real_session_id, cwd, input, providerID && modelID ? { providerID, modelID } : undefined);
+    const reply = invoke();
     try {
       // The turn ends when the prompt reply and the event stream both settle
       // (reply resolves + idle/quiescence/stream-end). The stall timer races
       // that whole completion so a hung prompt POST — the rate-limit retry
       // loop never resolves it — still fails the turn instead of hanging it.
       await Promise.race([Promise.all([reply, settled]), stalled]);
+      handlers.onStatusChange('completed');
     } finally {
       clearTimeout(quiescenceTimer);
       clearInterval(stallTimer);
@@ -444,7 +460,6 @@ export class OpenCodeAdapter extends BaseAdapter {
         }
       }
     }
-    handlers.onStatusChange('completed');
   }
 
   private async answerPermission(
