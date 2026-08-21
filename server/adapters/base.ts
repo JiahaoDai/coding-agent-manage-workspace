@@ -1,4 +1,11 @@
-import type { AgentAdapter, PromptHandlers } from '../../shared/adapter';
+import type {
+  AgentAdapter,
+  CapabilityResult,
+  ModelOption,
+  NativeCommand,
+  PromptHandlers,
+  ShellCommandResult,
+} from '../../shared/adapter';
 import type { Message, NativeSession } from '../../shared/session';
 
 /**
@@ -19,6 +26,42 @@ export abstract class BaseAdapter implements AgentAdapter {
     return [];
   }
 
+  async listModels(_cwd: string): Promise<CapabilityResult<ModelOption[]>> {
+    return unsupported('model discovery');
+  }
+
+  async setModel(
+    _real_session_id: string,
+    _cwd: string,
+    _model_id: string,
+  ): Promise<CapabilityResult<void>> {
+    return unsupported('model selection');
+  }
+
+  async listNativeCommands(
+    _real_session_id: string,
+    _cwd: string,
+  ): Promise<CapabilityResult<NativeCommand[]>> {
+    return unsupported('native slash commands');
+  }
+
+  async runNativeCommand(
+    _real_session_id: string,
+    _cwd: string,
+    _command: string,
+    _handlers: PromptHandlers,
+  ): Promise<CapabilityResult<void>> {
+    return unsupported('native slash commands');
+  }
+
+  async runShellCommand(
+    _real_session_id: string,
+    _cwd: string,
+    _command: string,
+  ): Promise<CapabilityResult<ShellCommandResult>> {
+    return unsupported('direct shell commands');
+  }
+
   abstract createSession(cwd: string, opts?: { name?: string }): Promise<{ real_session_id: string }>;
 
   abstract prompt(
@@ -27,4 +70,8 @@ export abstract class BaseAdapter implements AgentAdapter {
     input: string,
     handlers: PromptHandlers,
   ): Promise<void>;
+}
+
+function unsupported<T>(capability: string): CapabilityResult<T> {
+  return { supported: false, reason: `This agent does not support ${capability}.` };
 }

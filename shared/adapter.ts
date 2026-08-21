@@ -1,5 +1,40 @@
 import type { Message, NativeSession, SessionStatus } from './session';
 
+/** A capability response deliberately distinguishes an unsupported SDK feature
+ * from a supported feature that happens to have no current results. For
+ * example, model discovery with no configured models is supported with `[]`,
+ * while an adapter that cannot discover models returns `supported: false`. */
+export type CapabilityResult<T> =
+  | { supported: true; value: T }
+  | { supported: false; reason: string };
+
+/** A model the dashboard may display and submit back to the same adapter. */
+export interface ModelOption {
+  /** Stable, agent-native identifier used for selection. */
+  id: string;
+  /** Human-readable label for the model picker. */
+  label: string;
+  /** Optional provider/account grouping supplied by the adapter. */
+  provider?: string;
+}
+
+/** An agent-native slash command available in the current session context. */
+export interface NativeCommand {
+  /** Canonical command text, including the leading slash. */
+  name: string;
+  /** Short explanation suitable for composer autocomplete. */
+  description?: string;
+}
+
+/** The structured result of a direct user shell command. It is never an agent
+ * prompt or an adapter failure merely because `exit_code` is non-zero. */
+export interface ShellCommandResult {
+  command: string;
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+}
+
 /**
  * The single seam between the server and any coding agent. Every agent is
  * wrapped by one implementation of this interface; the server never talks to
@@ -27,6 +62,32 @@ export interface AgentAdapter {
    * turn finishes (or rejects on error).
    */
   prompt(real_session_id: string, cwd: string, input: string, handlers: PromptHandlers): Promise<void>;
+
+  /** Discover models currently usable by this agent in the local environment. */
+  listModels(cwd: string): Promise<CapabilityResult<ModelOption[]>>;
+
+  /** Select a model for a native session before its next turn. */
+  setModel(real_session_id: string, cwd: string, model_id: string): Promise<CapabilityResult<void>>;
+
+  /** Discover agent-native slash commands in the current session context. */
+  listNativeCommands(real_session_id: string, cwd: string): Promise<CapabilityResult<NativeCommand[]>>;
+
+  /** Execute an agent-native slash command. Agent tool calls still stream and
+   * use the normal permission handlers. */
+  runNativeCommand(
+    real_session_id: string,
+    cwd: string,
+    command: string,
+    handlers: PromptHandlers,
+  ): Promise<CapabilityResult<void>>;
+
+  /** Execute an explicitly user-authorised shell command in the session cwd.
+   * The result is rendered separately and must not be injected into agent context. */
+  runShellCommand(
+    real_session_id: string,
+    cwd: string,
+    command: string,
+  ): Promise<CapabilityResult<ShellCommandResult>>;
 }
 
 /** Callbacks an adapter drives while streaming a prompt. */

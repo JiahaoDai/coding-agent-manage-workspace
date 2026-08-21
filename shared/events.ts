@@ -1,3 +1,4 @@
+import type { ShellCommandResult } from './adapter';
 import type { SessionRecord, SessionStatus } from './session';
 
 /**
@@ -15,5 +16,6 @@ export type ServerEvent =
   | { type: 'status_change'; session_id: string; status: SessionStatus }
   | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; input: unknown }
   | { type: 'permission_response'; session_id: string; request_id: string; decision: 'allow' | 'deny' }
+  | { type: 'shell_result'; session_id: string; result: ShellCommandResult }
   | { type: 'session_removed'; session_id: string }
   | { type: 'error'; session_id: string; message: string };

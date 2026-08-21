@@ -4,9 +4,11 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Shared dashboard contracts express model options, model selection, native command discovery/execution, and direct-shell results without leaking one agent's SDK shape to the client.
-- [ ] Registered adapters and the fake adapter preserve existing create, history, prompt, event, and permission behaviour.
-- [ ] Unsupported agent capabilities are represented explicitly rather than silently treated as normal prompts.
-- [ ] Contract tests demonstrate compatible behaviour at the adapter boundary.
+- [x] Shared dashboard contracts express model options, model selection, native command discovery/execution, and direct-shell results without leaking one agent's SDK shape to the client.
+- [x] Registered adapters and the fake adapter preserve existing create, history, prompt, event, and permission behaviour.
+- [x] Unsupported agent capabilities are represented explicitly rather than silently treated as normal prompts.
+- [x] Contract tests demonstrate compatible behaviour at the adapter boundary.
+
+**Verified:** adapter contract and existing adapter tests, TypeScript typecheck, production build, and the full test suite (99 tests) pass.
