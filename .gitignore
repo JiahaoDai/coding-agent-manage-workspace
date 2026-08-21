@@ -5,3 +5,6 @@ data/
 .DS_Store
 .env
 test/
+.agents/
+skills-lock.json
+AGENTS.md
