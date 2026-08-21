@@ -62,6 +62,7 @@ export function createApp(deps: AppDeps): Hono {
       name,
       cwd,
       status: 'completed',
+      last_error: null,
       create_time: now,
       modify_time: now,
     };
@@ -179,6 +180,7 @@ export function createApp(deps: AppDeps): Hono {
       name,
       cwd,
       status: 'completed',
+      last_error: null,
       create_time: now,
       modify_time: now,
     };
@@ -245,12 +247,13 @@ export function createApp(deps: AppDeps): Hono {
         deps.sse.broadcast({ type: 'status_change', session_id, status: 'completed' });
       }
     } catch (err) {
-      deps.store.updateStatus(session_id, 'error');
+      const message = err instanceof Error ? err.message : String(err);
+      deps.store.recordError(session_id, message);
       deps.sse.broadcast({ type: 'status_change', session_id, status: 'error' });
       deps.sse.broadcast({
         type: 'error',
         session_id,
-        message: err instanceof Error ? err.message : String(err),
+        message,
       });
     }
 

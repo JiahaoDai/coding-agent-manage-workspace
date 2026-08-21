@@ -16,6 +16,7 @@ export class SessionStore {
         name            TEXT NOT NULL,
         cwd             TEXT NOT NULL,
         status          TEXT NOT NULL,
+        last_error      TEXT,
         create_time     INTEGER NOT NULL,
         modify_time     INTEGER NOT NULL
       );
@@ -23,15 +24,23 @@ export class SessionStore {
       CREATE INDEX IF NOT EXISTS idx_session_agent_status_cwd
         ON session (coding_agent, status, cwd);
     `);
+
+    // `CREATE TABLE IF NOT EXISTS` cannot amend installations created before
+    // ticket 02. Keep this migration idempotent so their session metadata and
+    // native-session mapping survive the upgrade.
+    const columns = db.prepare(`PRAGMA table_info(session)`).all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'last_error')) {
+      db.exec(`ALTER TABLE session ADD COLUMN last_error TEXT`);
+    }
   }
 
   insert(session: SessionRecord): void {
     this.db
       .prepare(
         `INSERT INTO session
-           (session_id, coding_agent, real_session_id, name, cwd, status, create_time, modify_time)
+           (session_id, coding_agent, real_session_id, name, cwd, status, last_error, create_time, modify_time)
          VALUES
-           (@session_id, @coding_agent, @real_session_id, @name, @cwd, @status, @create_time, @modify_time)`,
+           (@session_id, @coding_agent, @real_session_id, @name, @cwd, @status, @last_error, @create_time, @modify_time)`,
       )
       .run(session);
   }
@@ -39,7 +48,7 @@ export class SessionStore {
   list(): SessionRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT session_id, coding_agent, real_session_id, name, cwd, status, create_time, modify_time
+        `SELECT session_id, coding_agent, real_session_id, name, cwd, status, last_error, create_time, modify_time
          FROM session ORDER BY modify_time DESC`,
       )
       .all() as SessionRow[];
@@ -49,7 +58,7 @@ export class SessionStore {
   get(session_id: string): SessionRecord | undefined {
     const row = this.db
       .prepare(
-        `SELECT session_id, coding_agent, real_session_id, name, cwd, status, create_time, modify_time
+        `SELECT session_id, coding_agent, real_session_id, name, cwd, status, last_error, create_time, modify_time
          FROM session WHERE session_id = ?`,
       )
       .get(session_id) as SessionRow | undefined;
@@ -58,8 +67,23 @@ export class SessionStore {
 
   updateStatus(session_id: string, status: SessionStatus): void {
     this.db
-      .prepare(`UPDATE session SET status = ?, modify_time = ? WHERE session_id = ?`)
-      .run(status, Date.now(), session_id);
+      .prepare(
+        `UPDATE session
+         SET status = ?,
+             last_error = CASE WHEN ? = 'completed' THEN NULL ELSE last_error END,
+             modify_time = ?
+         WHERE session_id = ?`,
+      )
+      .run(status, status, Date.now(), session_id);
+  }
+
+  /** Persist a real adapter/SDK failure. Deliberately separate from ordinary
+   * status writes so callers for user-owned shell commands cannot accidentally
+   * turn a non-zero exit into an agent-session error. */
+  recordError(session_id: string, message: string): void {
+    this.db
+      .prepare(`UPDATE session SET status = 'error', last_error = ?, modify_time = ? WHERE session_id = ?`)
+      .run(message, Date.now(), session_id);
   }
 
   delete(session_id: string): void {
@@ -74,6 +98,7 @@ interface SessionRow {
   name: string;
   cwd: string;
   status: SessionStatus;
+  last_error: string | null;
   create_time: number;
   modify_time: number;
 }

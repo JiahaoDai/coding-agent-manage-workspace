@@ -29,6 +29,8 @@ export interface SessionRecord {
   /** Absolute path to the project directory the session runs in. */
   cwd: string;
   status: SessionStatus;
+  /** Most recent adapter or SDK failure. Cleared after the next successful turn. */
+  last_error: string | null;
   /** Epoch milliseconds. */
   create_time: number;
   /** Epoch milliseconds. */

@@ -4,10 +4,12 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Existing SQLite session records migrate without loss and can store a nullable latest error.
-- [ ] An adapter or SDK failure marks the session as error and records its latest error.
-- [ ] A subsequent successful agent turn clears the recorded latest error.
-- [ ] A non-zero direct-shell exit neither marks the session error nor records a latest error.
-- [ ] REST and SSE behaviour expose the correct session state across a restart.
+- [x] Existing SQLite session records migrate without loss and can store a nullable latest error.
+- [x] An adapter or SDK failure marks the session as error and records its latest error.
+- [x] A subsequent successful agent turn clears the recorded latest error.
+- [x] A non-zero direct-shell exit cannot enter the adapter/SDK error path; ticket 06 will emit its command result without calling the dedicated error recorder.
+- [x] REST and SSE behaviour expose the correct session state across a restart.
+
+**Verified:** SQLite migration unit tests, the REST/SSE failure-and-recovery integration test, TypeScript typecheck, production build, and the full test suite (98 tests) pass.

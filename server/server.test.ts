@@ -442,6 +442,13 @@ describe('streaming conversation (ticket #2)', () => {
 
       const list = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
       expect(list[0].status).toBe('error');
+      expect(list[0].last_error).toContain('kaboom');
+
+      fake.promptError = undefined;
+      const retry = await post(baseUrl, `/api/sessions/${created.session_id}/message`, { text: 'try again' });
+      expect(retry.status).toBe(202);
+      const recovered = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
+      expect(recovered[0]).toMatchObject({ status: 'completed', last_error: null });
 
       await reader.cancel();
     } finally {

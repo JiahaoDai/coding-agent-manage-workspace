@@ -17,6 +17,7 @@ function session(overrides: Partial<SessionRecord>): SessionRecord {
     name: 'Name',
     cwd: '/tmp/name',
     status: 'completed',
+    last_error: null,
     create_time: 0,
     modify_time: 0,
     ...overrides,
