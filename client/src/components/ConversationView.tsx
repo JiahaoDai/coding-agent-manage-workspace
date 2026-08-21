@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import ReactMarkdown from 'react-markdown';
+import rehypeHighlight from 'rehype-highlight';
+import remarkGfm from 'remark-gfm';
 import type { AssistantPart, ConversationMessage } from '../conversation';
 import { STATUS_LABEL } from '../labels';
 import type { SessionRecord } from '../types';
@@ -6,7 +9,13 @@ import type { SessionRecord } from '../types';
 function Part({ part }: { part: AssistantPart }) {
   switch (part.kind) {
     case 'text':
-      return <div className="assistant-text">{part.text}</div>;
+      return (
+        <div className="assistant-text">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+            {part.text}
+          </ReactMarkdown>
+        </div>
+      );
     case 'thinking':
       return (
         <details className="thinking">
@@ -67,6 +76,7 @@ export function ConversationView({
   onSend,
   loading = false,
   error = null,
+  awaitingFirstResponse = false,
 }: {
   session: SessionRecord;
   messages: ConversationMessage[];
@@ -75,6 +85,8 @@ export function ConversationView({
   loading?: boolean;
   /** Error from loading the session's history, when there is one. */
   error?: string | null;
+  /** True from prompt submission until the first displayable response event. */
+  awaitingFirstResponse?: boolean;
 }) {
   const [draft, setDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -86,7 +98,7 @@ export function ConversationView({
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  }, [messages, awaitingFirstResponse]);
 
   function submit() {
     const text = draft.trim();
@@ -126,6 +138,13 @@ export function ConversationView({
           <p className="conversation-empty">Send a message to start the conversation.</p>
         ) : (
           messages.map((message, index) => <Message key={index} message={message} />)
+        )}
+        {awaitingFirstResponse && (
+          <div className="msg msg-assistant response-pending" role="status" aria-label="Agent is responding">
+            <span className="response-pending-dot" />
+            <span className="response-pending-dot" />
+            <span className="response-pending-dot" />
+          </div>
         )}
       </div>
 

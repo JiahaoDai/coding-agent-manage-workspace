@@ -21,7 +21,10 @@
     "better-sqlite3": "^13.0.3",
     "hono": "^4.13.2",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",

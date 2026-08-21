@@ -4,9 +4,11 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Assistant response text renders GFM constructs and highlighted code without interpreting raw HTML.
-- [ ] User messages, thinking, tool data, and command output remain plain-text or structured diagnostic UI.
-- [ ] A transient dynamic loading indicator starts on normal prompt submission and clears on the first displayable event or terminal error.
-- [ ] Existing native-history display and streamed conversation behaviour remain intact.
+- [x] Assistant response text renders GFM constructs and highlighted code without interpreting raw HTML.
+- [x] User messages, thinking, tool data, and command output remain plain-text or structured diagnostic UI.
+- [x] A transient dynamic loading indicator starts on normal prompt submission and clears on the first displayable event or terminal error.
+- [x] Existing native-history display and streamed conversation behaviour remain intact.
+
+**Verified:** client test suite (18 tests), TypeScript typecheck, and production build pass. The existing server integration suite times out independently of this client-focused ticket.

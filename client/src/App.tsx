@@ -9,6 +9,7 @@ import {
   applyStreamEvent,
   applyUserMessage,
   messagesToConversation,
+  isDisplayableStreamEvent,
   toStreamEvent,
   type ConversationMessage,
   type StreamableServerEvent,
@@ -29,6 +30,10 @@ export function App() {
   const [creating, setCreating] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Record<string, ConversationMessage[]>>({});
+  // Starts on normal prompt submission and ends at the first visible stream
+  // event. This is deliberately separate from history: old assistant messages
+  // must not suppress the pending feedback for a new turn.
+  const [awaitingFirstResponse, setAwaitingFirstResponse] = useState<Record<string, boolean>>({});
   // Outstanding permission requests, oldest first, across all sessions. The
   // modal shows the first; the rest queue behind it.
   const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
@@ -71,6 +76,9 @@ export function App() {
           setSessions((prev) =>
             prev.map((s) => (s.session_id === event.session_id ? { ...s, status: event.status } : s)),
           );
+          if (event.status !== 'running') {
+            setAwaitingFirstResponse((prev) => ({ ...prev, [event.session_id]: false }));
+          }
           break;
         case 'session_removed':
           removeSession(event.session_id);
@@ -84,6 +92,9 @@ export function App() {
           const sid = event.session_id;
           if (sid) {
             const streamEvent = toStreamEvent(event as StreamableServerEvent);
+            if (isDisplayableStreamEvent(streamEvent)) {
+              setAwaitingFirstResponse((prev) => ({ ...prev, [sid]: false }));
+            }
             setConversations((prev) => ({
               ...prev,
               [sid]: applyStreamEvent(prev[sid] ?? [], streamEvent),
@@ -92,6 +103,7 @@ export function App() {
           break;
         }
         case 'permission_request':
+          setAwaitingFirstResponse((prev) => ({ ...prev, [event.session_id]: false }));
           setPermissionQueue((prev) =>
             prev.some((p) => sameRequest(p, event))
               ? prev
@@ -145,6 +157,7 @@ export function App() {
   async function handleSend(session: SessionRecord, text: string) {
     const id = session.session_id;
     setConversations((prev) => ({ ...prev, [id]: applyUserMessage(prev[id] ?? [], text) }));
+    setAwaitingFirstResponse((prev) => ({ ...prev, [id]: true }));
     try {
       await sendMessage(id, text);
     } catch (err) {
@@ -153,6 +166,7 @@ export function App() {
         ...prev,
         [id]: applyStreamEvent(prev[id] ?? [], { type: 'error', message: detail }),
       }));
+      setAwaitingFirstResponse((prev) => ({ ...prev, [id]: false }));
     }
   }
 
@@ -160,6 +174,11 @@ export function App() {
   function removeSession(sessionId: string) {
     setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
     setConversations((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    setAwaitingFirstResponse((prev) => {
       const next = { ...prev };
       delete next[sessionId];
       return next;
@@ -242,6 +261,7 @@ export function App() {
             onSend={(text) => void handleSend(selected, text)}
             loading={selectedHistory?.loading}
             error={selectedHistory?.error}
+            awaitingFirstResponse={awaitingFirstResponse[selected.session_id] ?? false}
           />
         ) : (
           <EmptyState onNewSession={() => setCreating(true)} />

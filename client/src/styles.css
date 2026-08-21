@@ -944,8 +944,140 @@ button:focus-visible {
 }
 
 .assistant-text {
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.assistant-text > :first-child {
+  margin-top: 0;
+}
+
+.assistant-text > :last-child {
+  margin-bottom: 0;
+}
+
+.assistant-text :is(h1, h2, h3, h4, h5, h6) {
+  margin: 1.25em 0 0.5em;
+  line-height: 1.25;
+}
+
+.assistant-text :is(p, ul, ol, blockquote, table) {
+  margin: 0 0 0.9em;
+}
+
+.assistant-text :is(ul, ol) {
+  padding-left: 1.5rem;
+}
+
+.assistant-text blockquote {
+  margin-left: 0;
+  padding-left: 0.9rem;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-secondary);
+}
+
+.assistant-text :not(pre) > code {
+  padding: 0.12em 0.32em;
+  border-radius: 4px;
+  background: var(--bg-input);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.assistant-text pre {
+  margin: 0 0 0.9em;
+  padding: 12px 14px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+}
+
+.assistant-text pre code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+
+/* rehype-highlight emits these classes. Keep a small theme local so highlighting
+   respects the dashboard's light/dark surfaces without importing a global theme. */
+.assistant-text .hljs-keyword,
+.assistant-text .hljs-selector-tag,
+.assistant-text .hljs-built_in {
+  color: #8b5cf6;
+}
+
+.assistant-text .hljs-string,
+.assistant-text .hljs-attr,
+.assistant-text .hljs-template-variable {
+  color: #c2410c;
+}
+
+.assistant-text .hljs-number,
+.assistant-text .hljs-literal,
+.assistant-text .hljs-title.function_ {
+  color: #0f766e;
+}
+
+.assistant-text .hljs-comment {
+  color: var(--text-secondary);
+}
+
+.assistant-text table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.93rem;
+}
+
+.assistant-text th,
+.assistant-text td {
+  padding: 7px 9px;
+  border: 1px solid var(--border-strong);
+  text-align: left;
+}
+
+.assistant-text th {
+  background: var(--bg-input);
+}
+
+.response-pending {
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  border-bottom-left-radius: 4px;
+  background: var(--bg-input);
+}
+
+.response-pending-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  animation: response-pending-bounce 1.1s infinite var(--ease);
+}
+
+.response-pending-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.response-pending-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes response-pending-bounce {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
 }
 
 /* Collapsible thinking + tool blocks: a shared disclosure chevron. */

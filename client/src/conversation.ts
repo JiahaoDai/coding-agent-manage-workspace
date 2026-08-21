@@ -38,6 +38,13 @@ export type StreamableServerEvent =
   | Extract<ServerEvent, { type: 'status_note' }>
   | Extract<ServerEvent, { type: 'error' }>;
 
+/** Every stream event changes content the user can see, including a tool's
+ * completion state and status/error notes. The client uses this boundary to
+ * remove the transient "waiting for first response" indicator. */
+export function isDisplayableStreamEvent(_event: StreamEvent): boolean {
+  return true;
+}
+
 /**
  * Fold messages read from the agent's native store (adapter `getMessages`) into
  * the display model. History carries text only — tool calls and thinking stream
