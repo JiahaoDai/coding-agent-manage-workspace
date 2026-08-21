@@ -9,6 +9,7 @@ const session = {
   name: 'Markdown check',
   cwd: '/project',
   status: 'completed' as const,
+  model: null,
   last_error: null,
   create_time: 1,
   modify_time: 1,

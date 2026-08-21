@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { PromptHandlers } from '../../shared/adapter';
+import type { CapabilityResult, ModelOption, PromptHandlers } from '../../shared/adapter';
 import type { NativeSession } from '../../shared/session';
 import { BaseAdapter } from './base';
 
@@ -20,6 +20,23 @@ import { BaseAdapter } from './base';
  */
 export class FakeAdapter extends BaseAdapter {
   private readonly native = new Map<string, { cwd: string; name: string }>();
+  private readonly selectedModels = new Map<string, string | null>();
+
+  async listModels(_cwd: string): Promise<CapabilityResult<ModelOption[]>> {
+    return { supported: true, value: [
+      { id: 'fake/fast', label: 'Fake Fast', provider: 'fake' },
+      { id: 'fake/quality', label: 'Fake Quality', provider: 'fake' },
+    ] };
+  }
+
+  async setModel(real_session_id: string, _cwd: string, model_id: string | null): Promise<CapabilityResult<void>> {
+    const models = await this.listModels('');
+    if (model_id !== null && (!models.supported || !models.value.some((model) => model.id === model_id))) {
+      throw new Error(`Model is not available: ${model_id}`);
+    }
+    this.selectedModels.set(real_session_id, model_id);
+    return { supported: true, value: undefined };
+  }
 
   async createSession(cwd: string, opts?: { name?: string }): Promise<{ real_session_id: string }> {
     const real_session_id = `fake-${randomUUID()}`;

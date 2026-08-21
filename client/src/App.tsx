@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { deleteSession, getSessionMessages, listAgents, listSessions, respondPermission, sendMessage } from './api';
+import { deleteSession, getSessionMessages, getSessionModels, listAgents, listSessions, respondPermission, selectSessionModel, sendMessage } from './api';
 import { ConversationView } from './components/ConversationView';
 import { CreateSessionForm } from './components/CreateSessionForm';
 import { EmptyState } from './components/EmptyState';
@@ -14,7 +14,7 @@ import {
   type ConversationMessage,
   type StreamableServerEvent,
 } from './conversation';
-import type { AgentId, PermissionRequest, ServerEvent, SessionRecord } from './types';
+import type { AgentId, ModelOption, PermissionRequest, ServerEvent, SessionRecord } from './types';
 
 /** Prepend only if the session is not already present — both the POST response
  * and the SSE `session_created` event may deliver the same session. */
@@ -42,6 +42,7 @@ export function App() {
   // while a failed fetch can be retried on the next select.
   const requestedHistory = useRef<Set<string>>(new Set());
   const [historyStatus, setHistoryStatus] = useState<Record<string, { loading: boolean; error?: string }>>({});
+  const [models, setModels] = useState<Record<string, { options: ModelOption[]; available: boolean }>>({});
 
   /**
    * A request id is only unique within a session (agents reuse per-turn
@@ -154,8 +155,26 @@ export function App() {
       });
   }, [selectedId]);
 
-  async function handleSend(session: SessionRecord, text: string) {
+  useEffect(() => {
+    if (!selectedId || models[selectedId]) return;
+    void getSessionModels(selectedId)
+      .then((result) => setModels((prev) => ({ ...prev, [selectedId]: result.supported ? { options: result.value, available: true } : { options: [], available: false } })))
+      .catch(() => setModels((prev) => ({ ...prev, [selectedId]: { options: [], available: false } })));
+  }, [selectedId, models]);
+
+  async function handleSend(session: SessionRecord, text: string, model: string | null) {
     const id = session.session_id;
+    if (model !== session.model) {
+      try {
+        const updated = await selectSessionModel(id, model);
+        setSessions((prev) => prev.map((item) => item.session_id === id ? updated : item));
+        session = updated;
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        setConversations((prev) => ({ ...prev, [id]: applyStreamEvent(prev[id] ?? [], { type: 'error', message: `Model selection failed: ${detail}` }) }));
+        return;
+      }
+    }
     setConversations((prev) => ({ ...prev, [id]: applyUserMessage(prev[id] ?? [], text) }));
     setAwaitingFirstResponse((prev) => ({ ...prev, [id]: true }));
     try {
@@ -258,7 +277,9 @@ export function App() {
           <ConversationView
             session={selected}
             messages={conversations[selected.session_id] ?? []}
-            onSend={(text) => void handleSend(selected, text)}
+            onSend={(text, model) => void handleSend(selected, text, model)}
+            models={models[selected.session_id]?.options}
+            modelsAvailable={models[selected.session_id]?.available}
             loading={selectedHistory?.loading}
             error={selectedHistory?.error}
             awaitingFirstResponse={awaitingFirstResponse[selected.session_id] ?? false}

@@ -62,6 +62,7 @@ export function createApp(deps: AppDeps): Hono {
       name,
       cwd,
       status: 'completed',
+      model: null,
       last_error: null,
       create_time: now,
       modify_time: now,
@@ -180,6 +181,7 @@ export function createApp(deps: AppDeps): Hono {
       name,
       cwd,
       status: 'completed',
+      model: null,
       last_error: null,
       create_time: now,
       modify_time: now,
@@ -189,6 +191,33 @@ export function createApp(deps: AppDeps): Hono {
     deps.sse.broadcast({ type: 'session_created', session_id: session.session_id, session });
 
     return c.json(session, 201);
+  });
+
+  app.get('/api/sessions/:id/models', async (c) => {
+    const session = deps.store.get(c.req.param('id'));
+    if (!session) return c.json({ error: 'session not found' }, 404);
+    const adapter = deps.adapters.get(session.coding_agent);
+    if (!adapter) return c.json({ error: `unknown agent: ${session.coding_agent}` }, 400);
+    return c.json(await adapter.listModels(session.cwd));
+  });
+
+  app.post('/api/sessions/:id/model', async (c) => {
+    const session_id = c.req.param('id');
+    const session = deps.store.get(session_id);
+    if (!session) return c.json({ error: 'session not found' }, 404);
+    const body = (await c.req.json().catch(() => null)) as { model_id?: unknown } | null;
+    const model_id = body?.model_id;
+    if (model_id !== null && typeof model_id !== 'string') return c.json({ error: 'model_id must be a string or null' }, 400);
+    const adapter = deps.adapters.get(session.coding_agent);
+    if (!adapter) return c.json({ error: `unknown agent: ${session.coding_agent}` }, 400);
+    try {
+      const result = await adapter.setModel(session.real_session_id, session.cwd, model_id);
+      if (!result.supported) return c.json({ error: result.reason }, 409);
+      deps.store.updateModel(session_id, model_id);
+      return c.json(deps.store.get(session_id)!);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 422);
+    }
   });
 
   // Send a message and stream the agent's reply downstream over SSE. The turn's

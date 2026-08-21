@@ -12,7 +12,7 @@ import {
   type SessionInfo,
   type ToolCallEvent,
 } from '@earendil-works/pi-coding-agent';
-import type { PromptHandlers } from '../../shared/adapter';
+import type { CapabilityResult, ModelOption, PromptHandlers } from '../../shared/adapter';
 import type { Message, NativeSession } from '../../shared/session';
 import { BaseAdapter } from './base';
 
@@ -32,6 +32,7 @@ import { BaseAdapter } from './base';
  * `session.sessionFile`.
  */
 export interface PiSdk {
+  listModels?(): Promise<ModelOption[]>;
   /**
    * Create a fresh persistent Pi session in `cwd`. Returns the native session
    * file path (deterministic once created; Pi materializes the `.jsonl` on disk
@@ -55,6 +56,7 @@ export interface PiSdk {
 
 /** A live Pi session, open for streaming. */
 export interface PiSessionHandle {
+  setModel?(model_id: string | null): Promise<void>;
   /** Send a prompt; resolves when the full run (including retries) finishes. */
   prompt(input: string): Promise<void>;
 
@@ -203,6 +205,11 @@ export function createPiSdk(config: { model?: string } = {}): PiSdk {
   }
 
   return {
+    async listModels() {
+      const runtime = await modelRuntime();
+      const models = await runtime.getAvailable();
+      return models.map((model) => ({ id: `${model.provider}/${model.id}`, label: model.name ?? model.id, provider: model.provider }));
+    },
     async createSession(cwd, opts) {
       const sm = SessionManager.create(cwd);
       const { session, permRef } = await createLive(cwd, sm);
@@ -247,6 +254,14 @@ export function createPiSdk(config: { model?: string } = {}): PiSdk {
       isStreaming: () => session.isStreaming,
       setPermissionResolver(resolver) {
         permRef.ask = resolver;
+      },
+      async setModel(model_id) {
+        if (model_id === null) return;
+        const [provider, id] = model_id.split('/', 2);
+        const runtime = await modelRuntime();
+        const model = provider && id ? runtime.getModel(provider, id) : undefined;
+        if (!model) throw new Error(`Model is not available: ${model_id}`);
+        await session.setModel(model);
       },
       subscribe(listener) {
         return session.subscribe((event) => {
@@ -331,6 +346,21 @@ export class PiAdapter extends BaseAdapter {
 
   async getMessages(real_session_id: string, cwd: string): Promise<Message[]> {
     return this.sdk.getMessages(real_session_id, cwd);
+  }
+
+  async listModels(_cwd: string): Promise<CapabilityResult<ModelOption[]>> {
+    if (!this.sdk.listModels) return { supported: false, reason: 'Pi model discovery is unavailable in this SDK.' };
+    return { supported: true, value: await this.sdk.listModels() };
+  }
+
+  async setModel(real_session_id: string, cwd: string, model_id: string | null): Promise<CapabilityResult<void>> {
+    const models = await this.listModels(cwd);
+    if (!models.supported) return models;
+    if (model_id !== null && !models.value.some((model) => model.id === model_id)) throw new Error(`Model is not available: ${model_id}`);
+    const handle = await this.sdk.openSession(real_session_id, cwd);
+    if (!handle.setModel) return { supported: false, reason: 'Pi model selection is unavailable in this SDK.' };
+    await handle.setModel(model_id);
+    return { supported: true, value: undefined };
   }
 
   async prompt(

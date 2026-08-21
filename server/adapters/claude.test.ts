@@ -155,7 +155,7 @@ function makeSdk(messages: SDKMessage[] = []) {
       return transcript;
     },
     async *query({ prompt, options }) {
-      calls.push({ prompt, options });
+      calls.push({ prompt: typeof prompt === 'string' ? prompt : '', options });
       // Drive the permission gate the way the real SDK does, so the adapter's
       // canUseTool wiring is observable.
       if (options?.canUseTool) {

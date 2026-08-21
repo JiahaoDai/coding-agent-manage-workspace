@@ -16,6 +16,7 @@ export class SessionStore {
         name            TEXT NOT NULL,
         cwd             TEXT NOT NULL,
         status          TEXT NOT NULL,
+        model           TEXT,
         last_error      TEXT,
         create_time     INTEGER NOT NULL,
         modify_time     INTEGER NOT NULL
@@ -32,15 +33,18 @@ export class SessionStore {
     if (!columns.some((column) => column.name === 'last_error')) {
       db.exec(`ALTER TABLE session ADD COLUMN last_error TEXT`);
     }
+    if (!columns.some((column) => column.name === 'model')) {
+      db.exec(`ALTER TABLE session ADD COLUMN model TEXT`);
+    }
   }
 
   insert(session: SessionRecord): void {
     this.db
       .prepare(
         `INSERT INTO session
-           (session_id, coding_agent, real_session_id, name, cwd, status, last_error, create_time, modify_time)
+           (session_id, coding_agent, real_session_id, name, cwd, status, model, last_error, create_time, modify_time)
          VALUES
-           (@session_id, @coding_agent, @real_session_id, @name, @cwd, @status, @last_error, @create_time, @modify_time)`,
+           (@session_id, @coding_agent, @real_session_id, @name, @cwd, @status, @model, @last_error, @create_time, @modify_time)`,
       )
       .run(session);
   }
@@ -48,7 +52,7 @@ export class SessionStore {
   list(): SessionRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT session_id, coding_agent, real_session_id, name, cwd, status, last_error, create_time, modify_time
+        `SELECT session_id, coding_agent, real_session_id, name, cwd, status, model, last_error, create_time, modify_time
          FROM session ORDER BY modify_time DESC`,
       )
       .all() as SessionRow[];
@@ -58,7 +62,7 @@ export class SessionStore {
   get(session_id: string): SessionRecord | undefined {
     const row = this.db
       .prepare(
-        `SELECT session_id, coding_agent, real_session_id, name, cwd, status, last_error, create_time, modify_time
+        `SELECT session_id, coding_agent, real_session_id, name, cwd, status, model, last_error, create_time, modify_time
          FROM session WHERE session_id = ?`,
       )
       .get(session_id) as SessionRow | undefined;
@@ -86,6 +90,10 @@ export class SessionStore {
       .run(message, Date.now(), session_id);
   }
 
+  updateModel(session_id: string, model: string | null): void {
+    this.db.prepare(`UPDATE session SET model = ?, modify_time = ? WHERE session_id = ?`).run(model, Date.now(), session_id);
+  }
+
   delete(session_id: string): void {
     this.db.prepare(`DELETE FROM session WHERE session_id = ?`).run(session_id);
   }
@@ -98,6 +106,7 @@ interface SessionRow {
   name: string;
   cwd: string;
   status: SessionStatus;
+  model: string | null;
   last_error: string | null;
   create_time: number;
   modify_time: number;

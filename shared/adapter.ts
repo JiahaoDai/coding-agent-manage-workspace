@@ -67,7 +67,7 @@ export interface AgentAdapter {
   listModels(cwd: string): Promise<CapabilityResult<ModelOption[]>>;
 
   /** Select a model for a native session before its next turn. */
-  setModel(real_session_id: string, cwd: string, model_id: string): Promise<CapabilityResult<void>>;
+  setModel(real_session_id: string, cwd: string, model_id: string | null): Promise<CapabilityResult<void>>;
 
   /** Discover agent-native slash commands in the current session context. */
   listNativeCommands(real_session_id: string, cwd: string): Promise<CapabilityResult<NativeCommand[]>>;

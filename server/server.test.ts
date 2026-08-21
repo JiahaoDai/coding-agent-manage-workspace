@@ -30,6 +30,7 @@ class ScriptedAdapter extends BaseAdapter {
   promptScript?: (handlers: PromptHandlers, ctx: PromptContext) => void | Promise<void>;
   /** If set, prompt rejects with this message instead of running the script. */
   promptError?: string;
+  modelSetCalls: Array<{ real_session_id: string; model_id: string | null }> = [];
   /** Decisions the adapter saw from onPermissionRequest, in call order. */
   permissionDecisions: Array<{
     request_id: string;
@@ -89,6 +90,16 @@ class ScriptedAdapter extends BaseAdapter {
     } finally {
       this.activePrompts -= 1;
     }
+  }
+
+  async listModels() {
+    return { supported: true as const, value: [{ id: 'fake/fast', label: 'Fake Fast', provider: 'fake' }] };
+  }
+
+  async setModel(real_session_id: string, _cwd: string, model_id: string | null) {
+    if (model_id !== null && model_id !== 'fake/fast') throw new Error(`Model is not available: ${model_id}`);
+    this.modelSetCalls.push({ real_session_id, model_id });
+    return { supported: true as const, value: undefined };
   }
 }
 
@@ -291,6 +302,24 @@ describe('walking skeleton', () => {
 });
 
 describe('streaming conversation (ticket #2)', () => {
+  it('lists available models and persists a selection only after the adapter accepts it', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const created = await createSession(baseUrl, 'models');
+      const available = await fetch(`${baseUrl}/api/sessions/${created.session_id}/models`);
+      expect(await available.json()).toEqual({ supported: true, value: [{ id: 'fake/fast', label: 'Fake Fast', provider: 'fake' }] });
+
+      const selected = await post(baseUrl, `/api/sessions/${created.session_id}/model`, { model_id: 'fake/fast' });
+      expect(selected.status).toBe(200);
+      expect((await selected.json()) as SessionRecord).toMatchObject({ model: 'fake/fast' });
+
+      const rejected = await post(baseUrl, `/api/sessions/${created.session_id}/model`, { model_id: 'missing/model' });
+      expect(rejected.status).toBe(422);
+      const stored = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
+      expect(stored[0].model).toBe('fake/fast');
+      expect(fake.modelSetCalls).toEqual([{ real_session_id: created.real_session_id, model_id: 'fake/fast' }]);
+    } finally { server.close(); db.close(); }
+  });
   it('streams a reply as text deltas over SSE and moves status running → completed', async () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {

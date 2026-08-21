@@ -8,6 +8,7 @@ export type {
   SessionStatus,
 } from '../../shared/session';
 export type { ServerEvent } from '../../shared/events';
+export type { CapabilityResult, ModelOption } from '../../shared/adapter';
 
 /** A permission request awaiting the user's decision, derived from the SSE event. */
 export interface PermissionRequest {

@@ -29,6 +29,8 @@ export interface SessionRecord {
   /** Absolute path to the project directory the session runs in. */
   cwd: string;
   status: SessionStatus;
+  /** Agent-native model selected for the next turn, or null for the agent default. */
+  model: string | null;
   /** Most recent adapter or SDK failure. Cleared after the next successful turn. */
   last_error: string | null;
   /** Epoch milliseconds. */

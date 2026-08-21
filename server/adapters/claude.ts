@@ -9,7 +9,7 @@ import {
   type SDKMessage,
   type SessionMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import type { PromptHandlers } from '../../shared/adapter';
+import type { CapabilityResult, ModelOption, PromptHandlers } from '../../shared/adapter';
 import type { Message, NativeSession } from '../../shared/session';
 import { BaseAdapter } from './base';
 
@@ -20,7 +20,10 @@ import { BaseAdapter } from './base';
  * real agent).
  */
 export interface ClaudeSdk {
-  query(params: { prompt: string; options?: Options }): AsyncIterable<SDKMessage>;
+  query(params: { prompt: string | AsyncIterable<never>; options?: Options }): AsyncIterable<SDKMessage> & {
+    supportedModels?: () => Promise<Array<{ value: string; displayName: string }>>;
+    close?: () => void;
+  };
   getSessionInfo(sessionId: string, options?: { dir?: string }): Promise<SDKSessionInfo | undefined>;
   listSessions(options?: { dir?: string }): Promise<SDKSessionInfo[]>;
   getSessionMessages(sessionId: string, options?: { dir?: string }): Promise<SessionMessage[]>;
@@ -40,6 +43,7 @@ const realSdk: ClaudeSdk = { query, getSessionInfo, listSessions, getSessionMess
  * id resolves, which keeps the adapter stateless across a server restart.
  */
 export class ClaudeAdapter extends BaseAdapter {
+  private readonly selectedModels = new Map<string, string | null>();
   constructor(private readonly sdk: ClaudeSdk = realSdk) {
     super();
   }
@@ -69,6 +73,28 @@ export class ClaudeAdapter extends BaseAdapter {
     return out;
   }
 
+  async listModels(cwd: string): Promise<CapabilityResult<ModelOption[]>> {
+    // Claude exposes available models from its initialized streaming Query. An
+    // empty input stream initializes controls without adding a user turn.
+    const control = this.sdk.query({ prompt: emptyInput(), options: { cwd, permissionMode: 'default' } });
+    if (!control.supportedModels) return { supported: false, reason: 'Claude model discovery is unavailable in this SDK.' };
+    try {
+      return { supported: true, value: (await control.supportedModels()).map((model) => ({ id: model.value, label: model.displayName, provider: 'Claude' })) };
+    } finally {
+      control.close?.();
+    }
+  }
+
+  async setModel(real_session_id: string, cwd: string, model_id: string | null): Promise<CapabilityResult<void>> {
+    if (model_id !== null) {
+      const models = await this.listModels(cwd);
+      if (!models.supported) return models;
+      if (!models.value.some((model) => model.id === model_id)) throw new Error(`Model is not available: ${model_id}`);
+    }
+    this.selectedModels.set(real_session_id, model_id);
+    return { supported: true, value: undefined };
+  }
+
   async prompt(
     real_session_id: string,
     cwd: string,
@@ -77,6 +103,7 @@ export class ClaudeAdapter extends BaseAdapter {
   ): Promise<void> {
     const options: Options = {
       cwd,
+      model: this.selectedModels.get(real_session_id) ?? undefined,
       // Design §9: always 'default', never bypass/accept-edits, so every
       // unapproved tool surfaces through canUseTool instead of silently running.
       permissionMode: 'default',
@@ -115,6 +142,10 @@ export class ClaudeAdapter extends BaseAdapter {
       mapClaudeMessage(message, handlers);
     }
   }
+}
+
+async function* emptyInput(): AsyncIterable<never> {
+  // The stream intentionally has no user message.
 }
 
 /**

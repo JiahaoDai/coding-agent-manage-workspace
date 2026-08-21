@@ -4,7 +4,7 @@ import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 import type { AssistantPart, ConversationMessage } from '../conversation';
 import { STATUS_LABEL } from '../labels';
-import type { SessionRecord } from '../types';
+import type { ModelOption, SessionRecord } from '../types';
 
 function Part({ part }: { part: AssistantPart }) {
   switch (part.kind) {
@@ -74,13 +74,17 @@ export function ConversationView({
   session,
   messages,
   onSend,
+  models = [],
+  modelsAvailable = false,
   loading = false,
   error = null,
   awaitingFirstResponse = false,
 }: {
   session: SessionRecord;
   messages: ConversationMessage[];
-  onSend: (text: string) => void;
+  onSend: (text: string, model: string | null) => void;
+  models?: ModelOption[];
+  modelsAvailable?: boolean;
   /** True while the session's history is being fetched from its native store. */
   loading?: boolean;
   /** Error from loading the session's history, when there is one. */
@@ -89,6 +93,7 @@ export function ConversationView({
   awaitingFirstResponse?: boolean;
 }) {
   const [draft, setDraft] = useState('');
+  const [model, setModel] = useState<string | null>(session.model);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const running = session.status === 'running';
@@ -100,10 +105,12 @@ export function ConversationView({
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, awaitingFirstResponse]);
 
+  useEffect(() => setModel(session.model), [session.session_id, session.model]);
+
   function submit() {
     const text = draft.trim();
     if (!canSend || text === '') return;
-    onSend(text);
+    onSend(text, model);
     setDraft('');
   }
 
@@ -155,6 +162,14 @@ export function ConversationView({
           submit();
         }}
       >
+        <label className="composer-model">
+          <span className="sr-only">Model</span>
+          <select value={model ?? ''} onChange={(event) => setModel(event.target.value || null)} disabled={running}>
+            <option value="">Use agent default</option>
+            {models.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+          </select>
+          {!modelsAvailable && <span className="composer-model-note">Default model</span>}
+        </label>
         <textarea
           className="composer-input"
           value={draft}

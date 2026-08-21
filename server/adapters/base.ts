@@ -33,7 +33,7 @@ export abstract class BaseAdapter implements AgentAdapter {
   async setModel(
     _real_session_id: string,
     _cwd: string,
-    _model_id: string,
+    _model_id: string | null,
   ): Promise<CapabilityResult<void>> {
     return unsupported('model selection');
   }

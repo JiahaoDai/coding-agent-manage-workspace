@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PromptHandlers } from '../../shared/adapter';
 import type { Message } from '../../shared/session';
 import {
+  createOpencodeSdk,
   mapOpencodeEvent,
   opencodeErrorDetail,
   OpenCodeAdapter,
@@ -13,6 +14,7 @@ import {
   type OpencodeSdk,
   type OpencodeTranscriptEntry,
 } from './opencode';
+import type { OpenCodeRuntime } from './opencode';
 
 /**
  * Fixtures for the events a real `opencode serve` emits. These are the live
@@ -264,6 +266,20 @@ function makeSdk(opts: {
 }
 
 describe('OpenCodeAdapter', () => {
+  it('shares one initial server spawn across concurrent model discovery requests', async () => {
+    let resolveServer!: (server: { url: string; close(): void }) => void;
+    const createServer = vi.fn(() => new Promise<{ url: string; close(): void }>((resolve) => { resolveServer = resolve; }));
+    const runtime: OpenCodeRuntime = {
+      createServer,
+      createClient: vi.fn(() => ({ config: { providers: vi.fn(async () => ({ data: { providers: [] } })) } }) as never),
+    };
+    const sdk = createOpencodeSdk({}, runtime);
+    const first = sdk.listModels!('/project');
+    const second = sdk.listModels!('/project');
+    expect(createServer).toHaveBeenCalledTimes(1);
+    resolveServer({ url: 'http://127.0.0.1:9999', close() {} });
+    await expect(Promise.all([first, second])).resolves.toEqual([[], []]);
+  });
   it('createSession returns the native session id', async () => {
     const adapter = new OpenCodeAdapter(makeSdk().sdk);
     expect(await adapter.createSession('/tmp/p', { name: 'fix auth' })).toEqual({

@@ -1,4 +1,4 @@
-import type { AgentId, FsEntry, Message, ResumableSession, SessionRecord } from './types';
+import type { AgentId, CapabilityResult, FsEntry, Message, ModelOption, ResumableSession, SessionRecord } from './types';
 
 export async function listAgents(): Promise<AgentId[]> {
   const res = await fetch('/api/agents');
@@ -56,6 +56,23 @@ export async function sendMessage(sessionId: string, text: string): Promise<void
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
     throw new Error(body?.error ?? `send failed: ${res.status}`);
   }
+}
+
+export async function getSessionModels(sessionId: string): Promise<CapabilityResult<ModelOption[]>> {
+  const res = await fetch(`/api/sessions/${sessionId}/models`);
+  if (!res.ok) throw new Error(`models failed: ${res.status}`);
+  return res.json();
+}
+
+export async function selectSessionModel(sessionId: string, model_id: string | null): Promise<SessionRecord> {
+  const res = await fetch(`/api/sessions/${sessionId}/model`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model_id }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `model selection failed: ${res.status}`);
+  }
+  return res.json();
 }
 
 /** A session's message history, read from the agent's native store at display time. */

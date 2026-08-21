@@ -3,7 +3,7 @@ import {
   createOpencodeServer,
   type OpencodeClient,
 } from '@opencode-ai/sdk';
-import type { PromptHandlers } from '../../shared/adapter';
+import type { CapabilityResult, ModelOption, PromptHandlers } from '../../shared/adapter';
 import type { Message, NativeSession } from '../../shared/session';
 import { BaseAdapter } from './base';
 
@@ -20,6 +20,7 @@ import { BaseAdapter } from './base';
  * streaming and permission event names (see the note on `OpencodeEvent`).
  */
 export interface OpencodeSdk {
+  listModels?(cwd: string): Promise<ModelOption[]>;
   /** Subscribe to the server's SSE event stream, scoped to `cwd`. */
   subscribe(cwd: string): Promise<AsyncIterable<OpencodeEvent>>;
 
@@ -36,7 +37,7 @@ export interface OpencodeSdk {
   prompt(
     real_session_id: string,
     cwd: string,
-    input: string,
+    input: string, model?: { providerID: string; modelID: string },
   ): Promise<{ info: OpencodeAssistantMessage; parts: OpencodePart[] }>;
 
   /** Reply to a pending permission request. `once`/`always` allow, `reject` denies. */
@@ -153,24 +154,50 @@ export interface OpencodeEventState {
  * server would pick on its own. Falls back to `OPENCODE_MODEL`, then to no
  * override (the server's own default).
  */
-export function createOpencodeSdk(config: { model?: string } = {}): OpencodeSdk {
+export interface OpenCodeRuntime {
+  createClient(config: { baseUrl: string; throwOnError: true }): OpencodeClient;
+  createServer(options?: { config: { model: string } }): Promise<{ url: string; close(): void }>;
+}
+
+export function createOpencodeSdk(
+  config: { model?: string } = {},
+  runtime: OpenCodeRuntime = { createClient: createOpencodeClient, createServer: createOpencodeServer },
+): OpencodeSdk {
   const model = config.model ?? process.env.OPENCODE_MODEL;
   let client: OpencodeClient | undefined;
-  let server: { url: string; close(): void } | undefined;
+  let clientPromise: Promise<OpencodeClient> | undefined;
 
   async function ensureClient(): Promise<OpencodeClient> {
     if (client) return client;
-    const url = process.env.OPENCODE_URL;
-    if (url) {
-      client = createOpencodeClient({ baseUrl: url, throwOnError: true });
-    } else {
-      server = await createOpencodeServer(model ? { config: { model } } : undefined);
-      client = createOpencodeClient({ baseUrl: server.url, throwOnError: true });
+    // Session creation, native-session discovery, and the model picker can all
+    // reach this lazy boundary during initial render. Share the in-flight spawn:
+    // launching two `opencode serve` processes for the same local state races
+    // on OpenCode's database and the second process exits with "database is
+    // locked".
+    clientPromise ??= (async () => {
+      const url = process.env.OPENCODE_URL;
+      if (url) return runtime.createClient({ baseUrl: url, throwOnError: true });
+      const server = await runtime.createServer(model ? { config: { model } } : undefined);
+      return runtime.createClient({ baseUrl: server.url, throwOnError: true });
+    })();
+    try {
+      client = await clientPromise;
+      return client;
+    } catch (err) {
+      // Allow a later user action to retry a failed initial launch.
+      clientPromise = undefined;
+      throw err;
     }
-    return client;
   }
 
   return {
+    async listModels(cwd) {
+      const c = await ensureClient();
+      const { data } = await c.config.providers({ throwOnError: true, query: { directory: cwd } });
+      return data.providers.flatMap((provider) => Object.values(provider.models).map((model) => ({
+        id: `${provider.id}/${model.id}`, label: model.name, provider: provider.name,
+      })));
+    },
     async subscribe(cwd) {
       const c = await ensureClient();
       const result = await c.event.subscribe({ query: { directory: cwd } });
@@ -203,13 +230,13 @@ export function createOpencodeSdk(config: { model?: string } = {}): OpencodeSdk 
       return data as unknown as OpencodeTranscriptEntry[];
     },
 
-    async prompt(real_session_id, cwd, input) {
+    async prompt(real_session_id, cwd, input, model) {
       const c = await ensureClient();
       const { data } = await c.session.prompt({
         throwOnError: true,
         path: { id: real_session_id },
         query: { directory: cwd },
-        body: { parts: [{ type: 'text' as const, text: input }] },
+        body: { parts: [{ type: 'text' as const, text: input }], model },
       });
       return data as unknown as { info: OpencodeAssistantMessage; parts: OpencodePart[] };
     },
@@ -241,6 +268,7 @@ export function createOpencodeSdk(config: { model?: string } = {}): OpencodeSdk 
  * state transitions, and permission requests that come back to the user.
  */
 export class OpenCodeAdapter extends BaseAdapter {
+  private readonly selectedModels = new Map<string, string | null>();
   constructor(
     private readonly sdk: OpencodeSdk = createOpencodeSdk(),
     private readonly quiescenceMs = 5000,
@@ -274,6 +302,21 @@ export class OpenCodeAdapter extends BaseAdapter {
       out.push({ role: entry.info.role, content });
     }
     return out;
+  }
+
+  async listModels(cwd: string): Promise<CapabilityResult<ModelOption[]>> {
+    if (!this.sdk.listModels) return { supported: false, reason: 'OpenCode model discovery is unavailable in this SDK.' };
+    return { supported: true, value: await this.sdk.listModels(cwd) };
+  }
+
+  async setModel(real_session_id: string, cwd: string, model_id: string | null): Promise<CapabilityResult<void>> {
+    if (model_id !== null) {
+      const models = await this.listModels(cwd);
+      if (!models.supported) return models;
+      if (!models.value.some((model) => model.id === model_id)) throw new Error(`Model is not available: ${model_id}`);
+    }
+    this.selectedModels.set(real_session_id, model_id);
+    return { supported: true, value: undefined };
   }
 
   async prompt(
@@ -377,7 +420,9 @@ export class OpenCodeAdapter extends BaseAdapter {
       }
     })();
 
-    const reply = this.sdk.prompt(real_session_id, cwd, input);
+    const selected = this.selectedModels.get(real_session_id);
+    const [providerID, modelID] = selected?.split('/', 2) ?? [];
+    const reply = this.sdk.prompt(real_session_id, cwd, input, providerID && modelID ? { providerID, modelID } : undefined);
     try {
       // The turn ends when the prompt reply and the event stream both settle
       // (reply resolves + idle/quiescence/stream-end). The stall timer races
