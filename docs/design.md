@@ -105,6 +105,7 @@ SQLite 数据库，核心表 `session`：
 - 会话列表（按 agent 分类 + 状态徽标 + 过滤/搜索）
 - 软删除会话
 - 多会话并发运行、各自状态实时可见
+- 分屏工作区（同一页面最多并排展示两个 session，均可独立输入）
 - 交互式权限确认
 
 ### 以后再做
@@ -160,6 +161,41 @@ SQLite 数据库，核心表 `session`：
 4. 用户点同意/拒绝 → 前端**POST** 回传 → 后端回调返回 `{ behavior: "allow" | "deny", ... }`。
 5. agent 继续执行或收到拒绝消息后调整。
 
+### 6.6 分屏工作区
+
+目标是提供类似 VS Code split editor 的对话工作区：同一个页面可并排展示两个 session，每个 panel 都能独立输入、查看流式输出、选择模型，并可同时运行。
+
+**工作区模型：**
+
+- 前端维护最多两个 panel：`paneId -> session_id`，另有 `activePane` 表示当前操作目标。
+- `Open` = 打开到 `activePane`；`Open in Split` = 打开到非 active panel。若当前只有一个 panel，则创建第二个 panel。
+- 同一 session 不允许在两个 panel 中重复打开；如果目标 session 已经打开，则只切换 `activePane` 到所在 panel。
+- 关闭 panel 后，剩余 panel 自动占满主区域；关闭最后一个 panel 后回到空状态。
+- 新建会话完成后默认放入 `activePane`，与 `Open` 行为保持一致。
+- panel 布局属于浏览器 UI 偏好，存 `localStorage`（open panels、`activePane`、split ratio），不写入 SQLite。
+
+**交互：**
+
+- 左侧 session 列表项支持右键菜单，仅包含 `Open` 和 `Open in Split`。
+- 删除仍沿用现有删除按钮，不放进右键菜单。
+- 两个 panel 中间有可拖拽分割线，用于调整左右比例；不提供额外的恢复比例按钮。
+- 每个 panel 标题栏都有关闭按钮。
+- 点击某个 panel 任意区域会激活该 panel；active panel 用轻量 accent 状态标识。
+
+**布局与内容换行：**
+
+- 分屏后不出现页面级横向滚动条；两个 panel 在主区域内自适应收缩。
+- 普通 Markdown 文本在 panel 内自动换行。
+- 代码块、命令输出、JSON 工具参数等保留块级内部横向滚动，避免破坏缩进与可读性。
+- panel 采用弱最小宽度：正常桌面宽度下尽量保持可用阅读宽度；窗口极窄时允许继续收缩，composer 内部自适应换行，发送按钮保持固定图标尺寸。
+- 每个 panel 的消息区独立纵向滚动。
+
+**权限请求：**
+
+- 权限请求仍使用全局 modal，避免请求被缩小 panel 或滚动区域遮住。
+- modal 必须明确展示来源 session（名称、agent，必要时包含 cwd）。
+- 如果请求来源 session 正在某个 panel 中打开，对应 panel 做轻微高亮，帮助用户定位。
+
 ---
 
 ## 7. 关键设计决策（附理由）
@@ -184,6 +220,7 @@ SQLite 数据库，核心表 `session`：
 | 16 | 工程结构 | 单仓库 package 下 client/server/shared | 本地工具无需 monorepo 重量 |
 | 17 | 列表管理 | 分类+状态+过滤/搜索，name 展示 | 字段已具备，过滤近乎免费 |
 | 18 | 通信 | SSE（下行）+ REST POST（上行） | 下行是单向流，SSE 自动重连；上行是离散请求 |
+| 19 | 分屏工作区 | 最多两个 panel，右键打开，拖拽分割线 | 满足同时观察/输入两个 session 的核心诉求，同时控制 v1 复杂度 |
 
 ---
 
