@@ -12,6 +12,7 @@ export function Sidebar({
   onOpenInSplit,
   onDelete,
   onNewSession,
+  onToggle,
 }: {
   sessions: SessionRecord[];
   connected: boolean;
@@ -20,6 +21,7 @@ export function Sidebar({
   onOpenInSplit: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
   onNewSession: () => void;
+  onToggle: () => void;
 }) {
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const filtered = filterSessions(sessions, filters);
@@ -32,6 +34,22 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
+        <button type="button" className="icon-btn sidebar-toggle" onClick={onToggle} aria-label="Hide sidebar" title="Hide sidebar">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3 5h18" />
+            <path d="M3 19h18" />
+            <path d="M9 5v14" />
+            <path d="m15 9-3 3 3 3" />
+          </svg>
+        </button>
         <span className="logo" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />

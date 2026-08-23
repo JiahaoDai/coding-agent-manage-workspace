@@ -90,6 +90,10 @@ button {
   height: 100%;
 }
 
+.app.is-sidebar-collapsed .conversation-header {
+  padding-left: 58px;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -173,7 +177,31 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 8px 16px;
+  padding: 4px 8px 16px 0;
+}
+
+.sidebar-toggle {
+  flex: 0 0 auto;
+}
+
+.sidebar-toggle svg,
+.sidebar-restore svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sidebar-restore {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 20;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.sidebar-restore:hover {
+  background: var(--bg-hover);
 }
 
 .logo {

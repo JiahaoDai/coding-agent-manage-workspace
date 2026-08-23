@@ -30,6 +30,7 @@ import {
 } from './workspace';
 
 const WORKSPACE_STORAGE_KEY = 'coding-agent-dashboard.workspace.v1';
+const SIDEBAR_STORAGE_KEY = 'coding-agent-dashboard.sidebar-collapsed.v1';
 
 /** Prepend only if the session is not already present — both the POST response
  * and the SSE `session_created` event may deliver the same session. */
@@ -44,6 +45,9 @@ export function App() {
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [connected, setConnected] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    typeof window === 'undefined' ? false : window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true',
+  );
   const [workspace, setWorkspace] = useState<WorkspaceState>(emptyWorkspace);
   const [conversations, setConversations] = useState<Record<string, ConversationMessage[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -84,6 +88,11 @@ export function App() {
     if (!sessionsLoaded || typeof window === 'undefined') return;
     window.localStorage.setItem(WORKSPACE_STORAGE_KEY, serializeWorkspace(workspace));
   }, [sessionsLoaded, workspace]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     if (!sessionsLoaded) return;
@@ -336,18 +345,44 @@ export function App() {
     : null;
 
   return (
-    <div className="app">
-      <Sidebar
-        sessions={sessions}
-        connected={connected}
-        selectedId={selectedId}
-        onSelect={handleOpen}
-        onOpenInSplit={handleOpenInSplit}
-        onDelete={handleDelete}
-        onNewSession={() => {
-          setCreating(true);
-        }}
-      />
+    <div className={`app${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`}>
+      {sidebarCollapsed ? (
+        <button
+          type="button"
+          className="icon-btn sidebar-restore"
+          onClick={() => setSidebarCollapsed(false)}
+          aria-label="Show sidebar"
+          title="Show sidebar"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3 5h18" />
+            <path d="M3 19h18" />
+            <path d="M9 5v14" />
+            <path d="m12 9 3 3-3 3" />
+          </svg>
+        </button>
+      ) : (
+        <Sidebar
+          sessions={sessions}
+          connected={connected}
+          selectedId={selectedId}
+          onSelect={handleOpen}
+          onOpenInSplit={handleOpenInSplit}
+          onDelete={handleDelete}
+          onNewSession={() => {
+            setCreating(true);
+          }}
+          onToggle={() => setSidebarCollapsed(true)}
+        />
+      )}
       <main className="main">
         {creating ? (
           <CreateSessionForm
