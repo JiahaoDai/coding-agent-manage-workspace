@@ -31,10 +31,10 @@ members:
 - 用户可以自定义 agent team，包括 team 名称、工作目录、成员角色、agent 类型、模型和角色说明。
 - 用户可以在一个 team chat 中向整个 team 发起任务，而不是逐个 agent 手动发送提示词。
 - team 内部通过 message bus 传递消息，消息有明确发送方、接收方、内容、任务状态和审计记录。
-- Team Orchestrator 根据 message bus、member inbox、依赖关系和并发策略自动调度 agent 执行。
+- Team Orchestrator 根据 message bus、member inbox、依赖关系和 V1 全局串行策略自动调度 agent 执行。
 - 页面能清楚展示 team 正在工作：哪个 member 在规划、哪个在执行、哪个在等待依赖、哪个已经完成。
 - 每个 member 的执行过程可以展开查看，并支持流式展示文本、工具调用、思考过程、权限请求和错误。
-- 多个 member 可以并发执行；同一个 member 的多个任务必须串行执行，避免同一个原生 agent session 并发 prompt 导致上下文错乱。
+- 第一版 team run 全局串行执行 delivery，避免多个 member 同时修改同一项目目录；后续版本再开放跨 member 并发。
 
 ---
 
@@ -86,7 +86,7 @@ WHERE to_member_id = ?
 
 ### 4.6 Run
 
-Run 表示用户在 team chat 中发起的一次完整协作任务。一个 run 下可以产生多条 message、多条 delivery、多个 member 的并发执行和最终汇总。
+Run 表示用户在 team chat 中发起的一次完整协作任务。一个 run 下可以产生多条 message、多条 delivery、多个 member 的接力执行和最终汇总。
 
 ### 4.7 Attempt
 
@@ -123,6 +123,8 @@ Attempt 表示某个 delivery 的一次执行尝试。若 delivery 失败后重�
 - 第一版不支持用户手动插队，也不支持手动提高某个 delivery 的优先级。
 - 第一版不支持用户在 run 中途直接向某个 member 补充消息，后续再考虑。
 - Leader 的 assignment 输出第一版使用 JSON contract，通过 prompt 和 few-shot 约束 leader 输出结构化计划。
+- 第一版采用全局串行 delivery 执行策略：同一个 team run 中任意时刻最多只有一个 delivery running。
+- `max_parallel_members` 可以保留在 schema 中，但第一版固定为 `1`，跨 member 并发留到后续版本。
 
 ---
 
@@ -136,6 +138,7 @@ interface TeamRecord {
   name: string;
   cwd: string;
   status: 'idle' | 'running' | 'error' | 'archived';
+  /** Reserved for later parallel execution. V1 is fixed to 1. */
   max_parallel_members: number;
   create_time: number;
   modify_time: number;
@@ -340,7 +343,35 @@ backend-coder Delivery #18 queued
 backend-coder Delivery #23 blocked
 ```
 
-### 8.3 跨 member 并发
+### 8.3 V1 全局串行执行
+
+第一版采用全局串行 delivery 执行策略。
+
+这意味着不只是同一个 member 串行，而是同一个 team run 中任意时刻最多只有一个 delivery 在执行：
+
+```text
+leader plan
+  ↓
+backend-coder implement
+  ↓
+reviewer review
+  ↓
+backend-coder fix
+  ↓
+leader final
+```
+
+V1 调度约束：
+
+- `max_parallel_members` 固定为 `1`。
+- Orchestrator 每次只启动一个 runnable delivery。
+- 即使多个 member 都有 pending delivery，也按依赖关系和队列顺序逐个执行。
+- 保留 dependency、blocked/pending/running/done 状态，为后续并发版本打基础。
+- 保留 per-member inbox 和 `enqueue_seq`，但全局调度层会保证任意时刻只有一个 running delivery。
+
+这样可以先把 message bus、delivery、dependency、leader plan、UI 展示和权限链路跑通，同时基本避开多个 agent 同时修改同一批文件导致的冲突。
+
+### 8.4 后续跨 member 并发
 
 不同 member 背后是不同 agent session，因此可以并发执行。
 
@@ -354,7 +385,7 @@ reviewer  running
 tester    running
 ```
 
-但 team 应配置最大并发数：
+后续版本可以开放 team 最大并发数：
 
 ```ts
 team.max_parallel_members = 3;
@@ -362,21 +393,21 @@ team.max_parallel_members = 3;
 
 避免一个 team 中大量 member 同时改文件、跑命令、触发权限请求。
 
-### 8.4 依赖调度
+### 8.5 依赖调度
 
 一个 delivery 能运行，需要满足：
 
 ```text
 status = pending
 member status = idle
-team running count < max_parallel_members
+team running count = 0 in V1
 所有 success 依赖都是 done
 所有 finished 依赖都是 done/failed/cancelled
 ```
 
 创建时依赖未满足的 delivery 应为 `blocked`。当上游 delivery 进入终态后，orchestrator 检查下游依赖，满足后转为 `pending`。
 
-### 8.5 防止死锁和无限循环
+### 8.6 防止死锁和无限循环
 
 - 创建 dependency 时检查同一 run 内是否形成环。
 - 每个 run 设置 `max_rounds`。
@@ -468,7 +499,9 @@ Worker/reviewer 的结果输出后续也可以改进为结构化 JSON。第一�
 
 ## 11. 文件修改冲突策略
 
-第一版 team 的所有 member 都在同一个项目目录 `cwd` 下运行，因此需要承认一个风险：多个 member 并发执行时，可能同时修改同一批文件。
+第一版 team 的所有 member 都在同一个项目目录 `cwd` 下运行，并采用全局串行 delivery 执行策略。因此 V1 基本不需要解决多个 member 同时修改同一批文件的问题。
+
+但后续一旦开放跨 member 并发，就需要重新处理文件冲突风险。
 
 可选方案：
 
@@ -478,7 +511,8 @@ Worker/reviewer 的结果输出后续也可以改进为结构化 JSON。第一�
 
 建议第一版采用这个方案，并加入保守规则：
 
-- 默认只有一个实现型 member 同时写代码。
+- 全局任意时刻只有一个 delivery running。
+- 默认只有一个实现型 member 在执行写代码任务。
 - reviewer/tester 默认依赖 coder 完成后再运行。
 - broadcast 更适合发给只读分析、review、测试计划等角色，不适合同时广播给多个写代码角色。
 - leader 的 assignment 中可以包含 `expected_files` 或 `scope`，用于 UI 提示潜在重叠，但第一版不强制锁定。
@@ -490,10 +524,10 @@ Worker/reviewer 的结果输出后续也可以改进为结构化 JSON。第一�
 - 符合当前“一个 team 一个项目目录”的产品决定。
 - 能复用现有 adapter、session、permission 体系。
 
-缺点：
+V1 限制：
 
-- 无法从文件系统层面阻止两个 member 修改同一文件。
-- 如果 leader 分配不当，仍可能发生覆盖式修改或语义冲突。
+- 如果后续开放并发，该方案无法从文件系统层面阻止两个 member 修改同一文件。
+- 如果用户手动在外部改文件，team 内部无法自动感知所有冲突。
 
 ### 11.2 Advisory File Lock
 
@@ -519,7 +553,7 @@ Worker/reviewer 的结果输出后续也可以改进为结构化 JSON。第一�
 
 结论：
 
-第一版采用“同目录 + 调度约束”。文档中明确不承诺自动解决文件冲突。后续如果 agent team 进入高并发代码修改场景，再设计可选的 worktree isolation mode。
+第一版采用“同目录 + 全局串行调度”。文档中明确不承诺自动解决外部文件冲突。后续如果 agent team 进入高并发代码修改场景，再设计可选的 worktree isolation mode 或 advisory file lock。
 
 ---
 
@@ -833,7 +867,8 @@ running -> cancelled
 - leader 可以生成 assignment。
 - Orchestrator 创建 worker delivery。
 - 支持 per-member inbox、enqueue_seq、member lock。
-- 支持跨 member 并发和 team-level max parallel。
+- 支持 team-level 全局串行调度。
+- `max_parallel_members` 固定为 `1`，暂不开放跨 member 并发。
 
 ### Phase 4：Dependency
 
@@ -856,13 +891,21 @@ running -> cancelled
 - 支持 worker 请求信息、worker-to-worker message、leader 审批广播。
 - 支持可配置协作策略。
 
+### Phase 7：并发与文件隔离
+
+- 开放 `max_parallel_members > 1` 的跨 member 并发。
+- 引入并发风险提示，例如多个 pending/running delivery 的 `expected_files` 重叠。
+- 评估 advisory file lock，避免 orchestrator 同时调度明显冲突的写任务。
+- 评估 git worktree isolation mode，让不同 member 在独立分支/worktree 中执行。
+- 设计 worktree 合并、冲突展示、用户确认和清理流程。
+
 ---
 
 ## 18. 测试建议
 
 - Store 测试：team/member/message/delivery/dependency 的 CRUD、迁移，以及 member/session/team 唯一性约束。
 - Queue 测试：同一 member 的 `enqueue_seq` 在事务中单调递增。
-- Scheduler 测试：同 member 串行、跨 member 并发、team max parallel 生效。
+- Scheduler 测试：V1 全局串行、同 member 串行、team 任意时刻最多一个 running delivery。
 - Dependency 测试：`success`、`finished`、blocked -> pending、环依赖拒绝。
 - SSE 测试：流式事件带完整 `team_id/run_id/member_id/delivery_id/attempt_id`。
 - UI 测试：run 块展示、member 状态展示、delivery 隔离展示、展开流式输出。
@@ -873,6 +916,7 @@ running -> cancelled
 
 ## 19. 后续开放问题
 
+- 什么时候从 V1 全局串行调度开放到 `max_parallel_members > 1`？
 - 什么时候引入可选的 git worktree isolation mode？
 - 如果引入 worktree mode，合并冲突由 UI 处理、leader 处理，还是交给用户手动处理？
 - 是否需要在 leader assignment 中加入 `expected_files`，用于提前提示多个 delivery 的潜在文件范围重叠？
@@ -888,8 +932,17 @@ Agent Team 的核心不是多个聊天窗口，而是一个由 message bus、del
 
 - 每个 member 一个逻辑 inbox。
 - 统一 delivery 表实现 inbox。
-- 跨 member 并发。
-- 单 member 串行。
+- 全局串行执行 delivery。
+- `max_parallel_members` V1 固定为 `1`，后续再开放跨 member 并发。
 - delivery 之间显式依赖。
 - 所有流式输出按 `run_id -> member_id -> delivery_id -> attempt_id` 隔离展示。
 - leader-driven orchestration 先落地，再逐步开放更自主的协作方式。
+
+下个版本优先优化：
+
+- 跨 member 并发执行。
+- 并发任务的文件范围提示。
+- advisory file lock。
+- git worktree isolation mode。
+- delivery retry 和 attempt 展示。
+- worker-to-worker message 和 run 中途用户补充消息。
