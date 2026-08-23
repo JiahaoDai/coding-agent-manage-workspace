@@ -462,9 +462,16 @@ Leader 输出给机器，UI 负责把 JSON 渲染成用户友好的计划视图�
 
 ## 10. Prompt 组装策略
 
-Orchestrator 投递给 member 的 prompt 应表达“处理你的 inbox”，而不是让 agent 感知数据库细节。
+Member 背后的原生 agent session 会保留自己的对话历史。创建 team 后，如果每次 delivery 都重复发送角色人设、完整 run 背景和历史消息，会造成上下文重复、token 浪费，甚至让 agent 误以为旧任务又被重新分配。
 
-示例：
+因此 prompt 分为两类：
+
+1. `member initialization prompt`：只在 member session 创建后发送一次，用于建立角色、人设、协作协议和输出规范。
+2. `delivery prompt`：每次执行 delivery 时发送，只包含本次新增任务、必要引用、依赖结果摘要和本次期望输出。
+
+### 10.1 Member Initialization Prompt
+
+初始化 prompt 在创建 team member 的原生 session 后发送一次。它可以包含稳定信息：
 
 ```text
 You are backend-coder in an agent team.
@@ -474,24 +481,61 @@ Your role:
 - Keep changes focused.
 - Report concise progress and final result to leader.
 
-Current team run:
-- User request: Add an agent team message bus.
+Collaboration rules:
+- You receive tasks from the team orchestrator.
+- Treat each incoming delivery as the next task in this same team session.
+- Do not assume a previous task should be repeated unless the new delivery says so.
+- Report results concisely for the leader.
 
-New messages in your inbox:
-
-[From leader]
-Task: Implement SQLite tables and server APIs for team message delivery.
-Expected output:
-- Code changes.
-- Tests.
-- Concise result summary.
-
-Respond using one of:
+Output format:
 - RESULT: ...
 - NEED_INFO: ...
 - MESSAGE_TO reviewer: ...
 - FAILED: ...
 ```
+
+该 prompt 进入 member 的原生 session 历史，后续不再重复发送。
+
+### 10.2 Delivery Prompt
+
+Delivery prompt 只发送增量信息。它不重复 role 人设，不重复完整历史，不重复已经在原生 session 中出现过的固定协作规则。
+
+示例：
+
+```text
+New delivery: delivery-12
+Run: run-42
+
+Task:
+Implement SQLite tables and server APIs for team message delivery.
+
+Context:
+- User request: Add an agent team message bus.
+- Leader plan summary: Build message, delivery, dependency, and sequential scheduler primitives.
+
+Expected output:
+- Code changes.
+- Tests.
+- Concise result summary.
+
+Use the output format already established for your role.
+```
+
+如果该 delivery 依赖上游 delivery，prompt 只包含上游结果摘要，而不是复制上游完整流式过程：
+
+```text
+Dependency results:
+- backend-coder delivery-12: done. Summary: Added team_message and team_message_delivery tables; tests passed.
+```
+
+### 10.3 Prompt 去重原则
+
+- 固定角色说明只进 initialization prompt。
+- 每次 delivery 只发送新增任务和必要摘要。
+- 不从 team database 复制 member 原生 session 的完整历史。
+- 不把同一个 message 的完整内容反复塞给同一个 member；通过 delivery status 和 `enqueue_seq` 保证只处理一次。
+- 如果需要提醒角色边界，只发送短提醒，例如 `Reminder: respond as reviewer, focus on risks and tests.`，不要重复整段 role prompt。
+- Team message bus 保存协作元数据和摘要，原生 agent session 保存成员自己的对话上下文。
 
 Worker/reviewer 的结果输出后续也可以改进为结构化 JSON。第一版可以先用受约束文本格式，再由 server 做简单解析或让 leader 负责解释 worker 输出。
 
