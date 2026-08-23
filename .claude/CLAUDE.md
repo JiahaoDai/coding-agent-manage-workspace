@@ -9,7 +9,7 @@ Issues are tracked in GitHub Issues; use the `gh` CLI to read and write them. Se
 Single-context layout: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
 ### design docs
-before you act, you must obey the `docs/design.md`
+before you act, you must obey the `docs/design.md`, the design of agent_team is in `docs/agent-team-prd.md`
 
 ### UI design
 reference chatgpt UI design.
