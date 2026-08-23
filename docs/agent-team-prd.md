@@ -106,8 +106,10 @@ Attempt 表示某个 delivery 的一次执行尝试。若 delivery 失败后重�
 4. leader 产出结构化计划或任务分配。
 5. Orchestrator 根据 leader 的计划创建 worker/reviewer 的 delivery。
 6. worker 执行后把结果写回 message bus。
-7. reviewer 根据依赖关系等待 worker 完成后执行 review。
-8. leader 等待必要结果后生成最终答复。
+7. Orchestrator 默认把 worker/reviewer 的结果投递回 leader。
+8. leader 重新审视结果后，可以追加任务、要求其他 member 处理、要求返工，或生成最终答复。
+9. reviewer 根据依赖关系等待 worker 完成后执行 review。
+10. leader 等待必要结果后生成最终答复。
 
 不建议第一版采用全员广播后完全自主抢答，因为它容易导致重复工作、上下文污染、任务无限循环、文件修改冲突和权限请求过载。
 
@@ -125,6 +127,7 @@ Attempt 表示某个 delivery 的一次执行尝试。若 delivery 失败后重�
 - Leader 的 assignment 输出第一版使用 JSON contract，通过 prompt 和 few-shot 约束 leader 输出结构化计划。
 - 第一版采用全局串行 delivery 执行策略：同一个 team run 中任意时刻最多只有一个 delivery running。
 - `max_parallel_members` 可以保留在 schema 中，但第一版固定为 `1`，跨 member 并发留到后续版本。
+- Member 可以发送受控 message；V1 默认只能发送给 leader，由 leader 决定是否继续分配新任务、要求 review/fix 或结束 run。
 
 ---
 
@@ -177,7 +180,7 @@ interface TeamRunRecord {
   run_id: string;
   team_id: string;
   root_user_message_id: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'running' | 'waiting_user' | 'completed' | 'failed' | 'cancelled';
   max_rounds: number;
   current_round: number;
   create_time: number;
@@ -205,6 +208,7 @@ interface TeamMessageRecord {
     | 'result'
     | 'review'
     | 'need_info'
+    | 'proposal'
     | 'final'
     | 'status'
     | 'error';
@@ -407,7 +411,55 @@ team running count = 0 in V1
 
 创建时依赖未满足的 delivery 应为 `blocked`。当上游 delivery 进入终态后，orchestrator 检查下游依赖，满足后转为 `pending`。
 
-### 8.6 防止死锁和无限循环
+### 8.6 Member Outbound Message 与 Leader Re-plan
+
+V1 不是一次性静态流水线。某个 member 完成 delivery 后，可以把执行结果、问题、建议或失败原因写回 message bus。Orchestrator 默认把这些 outbound message 投递给 leader，让 leader 重新审视当前 run。
+
+允许的 member outbound message 类型：
+
+```text
+result       完成任务后的结果摘要
+review       review 意见
+need_info    需要 leader 或用户补充信息
+failed       当前任务失败及原因
+proposal     建议追加任务或交给其他 member 处理
+```
+
+V1 路由规则：
+
+- worker/reviewer 默认只能向 leader 发送 outbound message。
+- worker 不直接给其他 worker 派任务。
+- worker-to-worker message 需要 leader 在下一轮 plan 中显式创建。
+- Orchestrator 收到 member outbound message 后，为 leader 创建一个 follow-up delivery。
+- leader follow-up delivery 可以输出新的 `plan` JSON、`need_user_input` 或 `final`。
+
+闭环示例：
+
+```text
+leader plan
+  ↓
+backend-coder implement
+  ↓
+backend-coder result -> leader
+  ↓
+leader re-plan: ask reviewer to review
+  ↓
+reviewer review
+  ↓
+reviewer proposal: backend should fix missing test
+  ↓
+leader re-plan: ask backend-coder to fix
+  ↓
+backend-coder fix
+  ↓
+backend-coder result -> leader
+  ↓
+leader final
+```
+
+这样即使 leader 第一次 plan 没有覆盖所有后续动作，team run 也可以根据 member 的实际执行结果继续推进。
+
+### 8.7 防止死锁和无限循环
 
 - 创建 dependency 时检查同一 run 内是否形成环。
 - 每个 run 设置 `max_rounds`。
@@ -417,11 +469,11 @@ team running count = 0 in V1
 
 ---
 
-## 9. Leader Assignment JSON Contract
+## 9. Leader JSON Contract
 
-Leader 的 planning 阶段应输出结构化 JSON，用于 Orchestrator 创建 message、delivery 和 dependency。
+Leader 的 planning 和 re-plan 阶段应输出结构化 JSON，用于 Orchestrator 创建 message、delivery 和 dependency，或者结束 run。
 
-示例：
+Plan 示例：
 
 ```json
 {
@@ -447,14 +499,36 @@ Leader 的 planning 阶段应输出结构化 JSON，用于 Orchestrator 创建 m
 }
 ```
 
+Final 示例：
+
+```json
+{
+  "type": "final",
+  "summary": "Implemented the requested message bus design and reviewed the result.",
+  "result": "The team message bus PRD is updated with sequential delivery, dependency handling, and member outbound message routing."
+}
+```
+
+Need user input 示例：
+
+```json
+{
+  "type": "need_user_input",
+  "question": "The backend implementation found an ambiguous storage choice. Should team messages be stored in the existing sessions.db or a separate teams.db?"
+}
+```
+
 Server 处理流程：
 
 1. `JSON.parse` leader 输出。
-2. 使用 schema 校验 `type`、`summary`、`assignments`、`to`、`depends_on`。
-3. 校验 `to` 必须是当前 team 的 member role。
-4. 校验 `depends_on` 必须指向同一 plan 中存在的 assignment id。
-5. 解析成功后创建 assignment message、delivery 和 dependency。
-6. 解析失败时不创建 delivery，展示 leader 原始输出和错误，让 run 进入需要处理的规划失败状态。
+2. 使用 schema 校验 `type`。
+3. 如果 `type = "plan"`，校验 `summary`、`assignments`、`to`、`depends_on`。
+4. 校验 `to` 必须是当前 team 的 member role。
+5. 校验 `depends_on` 必须指向同一 plan 中存在的 assignment id，或已经存在的 delivery/message 引用。
+6. 解析成功后创建 assignment message、delivery 和 dependency。
+7. 如果 `type = "final"`，创建 final message 并完成 run。
+8. 如果 `type = "need_user_input"`，创建 need_info message，并让 run 进入等待用户状态。
+9. 解析失败时不创建 delivery，展示 leader 原始输出和错误，让 run 进入需要处理的规划失败状态。
 
 Leader 输出给机器，UI 负责把 JSON 渲染成用户友好的计划视图。不要要求 leader 同时输出自然语言和 JSON，避免解析不稳定。
 
@@ -491,6 +565,7 @@ Output format:
 - RESULT: ...
 - NEED_INFO: ...
 - MESSAGE_TO reviewer: ...
+- PROPOSAL: ...
 - FAILED: ...
 ```
 
@@ -538,6 +613,18 @@ Dependency results:
 - Team message bus 保存协作元数据和摘要，原生 agent session 保存成员自己的对话上下文。
 
 Worker/reviewer 的结果输出后续也可以改进为结构化 JSON。第一版可以先用受约束文本格式，再由 server 做简单解析或让 leader 负责解释 worker 输出。
+
+V1 中 worker/reviewer 输出会被 Orchestrator 转成 outbound team message，并默认投递给 leader：
+
+```text
+RESULT    -> team_message.kind = result
+REVIEW    -> team_message.kind = review
+NEED_INFO -> team_message.kind = need_info
+PROPOSAL  -> team_message.kind = proposal
+FAILED    -> team_message.kind = error
+```
+
+如果 worker 输出 `MESSAGE_TO reviewer`，V1 不直接投递给 reviewer，而是转给 leader 审视；leader 可以在下一轮 plan 中显式创建给 reviewer 的 assignment。
 
 ---
 
@@ -876,6 +963,7 @@ running -> cancelled
 
 ```text
 running -> completed
+running -> waiting_user -> running
 running -> failed
 running -> cancelled
 ```
@@ -913,6 +1001,8 @@ running -> cancelled
 - 支持 per-member inbox、enqueue_seq、member lock。
 - 支持 team-level 全局串行调度。
 - `max_parallel_members` 固定为 `1`，暂不开放跨 member 并发。
+- 支持 member outbound message 默认回到 leader。
+- 支持 leader 根据 member 结果进行 re-plan。
 
 ### Phase 4：Dependency
 
@@ -951,6 +1041,7 @@ running -> cancelled
 - Queue 测试：同一 member 的 `enqueue_seq` 在事务中单调递增。
 - Scheduler 测试：V1 全局串行、同 member 串行、team 任意时刻最多一个 running delivery。
 - Dependency 测试：`success`、`finished`、blocked -> pending、环依赖拒绝。
+- Re-plan 测试：worker result/proposal/failed 后创建 leader follow-up delivery，leader 可继续 plan 或 final。
 - SSE 测试：流式事件带完整 `team_id/run_id/member_id/delivery_id/attempt_id`。
 - UI 测试：run 块展示、member 状态展示、delivery 隔离展示、展开流式输出。
 - Permission 测试：team permission modal 能正确标识来源 member 和 delivery。
