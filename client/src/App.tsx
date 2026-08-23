@@ -279,7 +279,6 @@ export function App() {
             messages={conversations[selected.session_id] ?? []}
             onSend={(text, model) => void handleSend(selected, text, model)}
             models={models[selected.session_id]?.options}
-            modelsAvailable={models[selected.session_id]?.available}
             loading={selectedHistory?.loading}
             error={selectedHistory?.error}
             awaitingFirstResponse={awaitingFirstResponse[selected.session_id] ?? false}

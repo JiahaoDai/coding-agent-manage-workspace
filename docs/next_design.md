@@ -18,9 +18,19 @@ eg: ......等等
 ### 模型的切换
 v1版本页面无法选择对应的模型来切换。查看各个agent是否存在相应的SDK能够查询model，然后在前面让用户切换
 
-### /command命令 以及 ! shell_command命令无法执行
+### /command命令 以及 ! shell_command命令无法执行（无法解决，SDK的方式只能发送prompt）
 目前排查是claude code、opencode、 pi agent的SDK支持问题。探讨是否存在解决方案
 
 ### 记录最后的报错信息
 项目session与agent session关联表是data/sessions.db中的session表
 目前对于某个agent报错之后，并没有记录上次报错的内容（仅记录上一次报错内容即可，之后报错进行覆盖即可）
+
+
+### session分屏显示，展示块能够显示多个session对话框，最多打开3个。
+
+### 多agent协同方式（一个目录下创建多个agent session，作为一个agent team, 分配角色， 来进行协同）
+leader
+client
+backend
+test
+自动分发任务，agent之间能够互相进行通信。
