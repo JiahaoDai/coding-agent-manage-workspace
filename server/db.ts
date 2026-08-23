@@ -191,6 +191,23 @@ export class SessionStore {
     return row ? { ...toTeam(row), members: this.listTeamMembers(team_id) } : undefined;
   }
 
+  deleteTeam(team_id: string): boolean {
+    const remove = this.db.transaction(() => {
+      const sessionRows = this.db
+        .prepare(`SELECT session_id FROM team_member WHERE team_id = ?`)
+        .all(team_id) as Array<{ session_id: string }>;
+      const deletedTeam = this.db.prepare(`DELETE FROM team WHERE team_id = ?`).run(team_id);
+      if (deletedTeam.changes === 0) return false;
+
+      this.db.prepare(`DELETE FROM team_member WHERE team_id = ?`).run(team_id);
+      const deleteSession = this.db.prepare(`DELETE FROM session WHERE session_id = ?`);
+      for (const row of sessionRows) deleteSession.run(row.session_id);
+      return true;
+    });
+
+    return remove();
+  }
+
   private listTeamMembers(team_id: string): TeamMemberRecord[] {
     const rows = this.db
       .prepare(

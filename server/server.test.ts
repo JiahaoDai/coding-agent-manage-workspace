@@ -435,6 +435,45 @@ describe('agent teams (v3 ticket #1)', () => {
       db.close();
     }
   });
+
+  it('deletes a team and its member session records from the dashboard database', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers) => handlers.onStatusChange('completed');
+      const created = await post(baseUrl, '/api/teams', {
+        name: 'Delete Me',
+        cwd: '/tmp/team-project',
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Lead the team.',
+          },
+          {
+            role: 'tester',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Test the work.',
+          },
+        ],
+      });
+      expect(created.status).toBe(201);
+      const team = await created.json() as { team_id: string };
+
+      const deleted = await fetch(`${baseUrl}/api/teams/${team.team_id}`, { method: 'DELETE' });
+      expect(deleted.status).toBe(200);
+      expect(await deleted.json()).toEqual({ ok: true });
+
+      expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toEqual([]);
+      expect(await (await fetch(`${baseUrl}/api/sessions`)).json()).toEqual([]);
+      const missing = await fetch(`${baseUrl}/api/teams/${team.team_id}`, { method: 'DELETE' });
+      expect(missing.status).toBe(404);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
 });
 
 describe('streaming conversation (ticket #2)', () => {

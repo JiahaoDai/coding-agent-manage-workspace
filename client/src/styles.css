@@ -1043,6 +1043,14 @@ button {
   border-bottom: 1px solid var(--border);
 }
 
+.team-overview-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .team-overview-kicker,
 .team-overview-cwd,
 .team-member-meta,
@@ -1074,6 +1082,10 @@ button {
   background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 0.82rem;
+}
+
+.team-delete-error {
+  margin-top: 14px;
 }
 
 .team-member-cards {

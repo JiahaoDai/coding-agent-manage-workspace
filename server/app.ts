@@ -61,6 +61,11 @@ export function createApp(deps: AppDeps): Hono {
     return team ? c.json(team) : c.json({ error: 'team not found' }, 404);
   });
 
+  app.delete('/api/teams/:id', (c) => {
+    const removed = deps.store.deleteTeam(c.req.param('id'));
+    return removed ? c.json({ ok: true }) : c.json({ error: 'team not found' }, 404);
+  });
+
   app.post('/api/teams', async (c) => {
     const body = (await c.req.json().catch(() => null)) as Partial<CreateTeamInput> | null;
     const validation = validateCreateTeam(body);

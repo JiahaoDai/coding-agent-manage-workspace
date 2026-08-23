@@ -45,12 +45,13 @@ describe('team creation UI', () => {
   });
 
   it('renders a created team with its fresh member sessions', () => {
-    const markup = renderToStaticMarkup(<TeamOverview team={team} />);
+    const markup = renderToStaticMarkup(<TeamOverview team={team} onDelete={() => {}} />);
 
     expect(markup).toContain('Product Builder');
     expect(markup).toContain('/project');
     expect(markup).toContain('leader');
     expect(markup).toContain('fake · default model');
     expect(markup).toContain('session-1');
+    expect(markup).toContain('Delete team');
   });
 });

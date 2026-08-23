@@ -66,6 +66,14 @@ export async function createTeam(input: CreateTeamInput): Promise<TeamWithMember
   return res.json();
 }
 
+export async function deleteTeam(teamId: string): Promise<void> {
+  const res = await fetch(`/api/teams/${teamId}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `delete team failed: ${res.status}`);
+  }
+}
+
 export async function createSession(input: {
   cwd: string;
   agent: AgentId;

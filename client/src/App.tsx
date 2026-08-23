@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
-import { deleteSession, getSessionMessages, getSessionModels, listAgents, listSessions, listTeams, respondPermission, selectSessionModel, sendMessage } from './api';
+import { deleteSession, deleteTeam, getSessionMessages, getSessionModels, listAgents, listSessions, listTeams, respondPermission, selectSessionModel, sendMessage } from './api';
 import { ConversationView } from './components/ConversationView';
 import { CreateSessionForm } from './components/CreateSessionForm';
 import { CreateTeamForm } from './components/CreateTeamForm';
@@ -49,6 +49,7 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [creating, setCreating] = useState<'session' | 'team' | null>(null);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+  const [teamDeleteError, setTeamDeleteError] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     typeof window === 'undefined' ? false : window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true',
   );
@@ -314,7 +315,20 @@ export function App() {
   function handleSelectTeam(teamId: string) {
     setCreating(null);
     setSelectedTeamId(teamId);
+    setTeamDeleteError(null);
     setWorkspace(emptyWorkspace);
+  }
+
+  async function handleDeleteTeam(teamId: string) {
+    setTeamDeleteError(null);
+    try {
+      await deleteTeam(teamId);
+      setTeams((prev) => prev.filter((team) => team.team_id !== teamId));
+      if (selectedTeamId === teamId) setSelectedTeamId(null);
+      void listSessions().then(setSessions);
+    } catch (err) {
+      setTeamDeleteError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   function handleClosePane(paneId: PaneId) {
@@ -430,7 +444,11 @@ export function App() {
             onCancel={() => setCreating(null)}
           />
         ) : selectedTeam ? (
-          <TeamOverview team={selectedTeam} />
+          <TeamOverview
+            team={selectedTeam}
+            deleteError={teamDeleteError}
+            onDelete={() => void handleDeleteTeam(selectedTeam.team_id)}
+          />
         ) : visiblePanels.length > 0 ? (
           <div
             className={`workspace workspace-${visiblePanels.length}`}

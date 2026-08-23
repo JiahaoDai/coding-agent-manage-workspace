@@ -161,4 +161,28 @@ describe('SessionStore agent team persistence', () => {
       db.close();
     }
   });
+
+  it('deletes a team with its member rows and dashboard session records', () => {
+    const db = new Database(':memory:');
+    try {
+      const store = new SessionStore(db);
+      store.insert(session());
+      store.insert(session({ session_id: 'dashboard-session-2', real_session_id: 'native-session-2' }));
+      store.insertTeam(team(), [
+        member(),
+        member({ member_id: 'member-2', role: 'tester', session_id: 'dashboard-session-2' }),
+      ]);
+
+      expect(store.deleteTeam('team-1')).toBe(true);
+
+      expect(store.getTeam('team-1')).toBeUndefined();
+      expect(store.get('dashboard-session-1')).toBeUndefined();
+      expect(store.get('dashboard-session-2')).toBeUndefined();
+      expect(store.listTeams()).toEqual([]);
+      expect(store.listVisibleSessions()).toEqual([]);
+      expect(store.deleteTeam('missing')).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
 });
