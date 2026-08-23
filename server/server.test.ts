@@ -59,7 +59,8 @@ class ScriptedAdapter extends BaseAdapter {
 
   async createSession(cwd: string, opts?: { name?: string }): Promise<{ real_session_id: string }> {
     this.created.push(cwd);
-    const real_session_id = `native-${cwd}`;
+    const countForCwd = this.nativeSessions.filter((session) => session.cwd === cwd).length;
+    const real_session_id = countForCwd === 0 ? `native-${cwd}` : `native-${cwd}-${countForCwd + 1}`;
     this.nativeSessions.push({ real_session_id, cwd, summary: opts?.name ?? 'native session' });
     return { real_session_id };
   }
@@ -295,6 +296,96 @@ describe('walking skeleton', () => {
         name: 'nope',
       });
       expect(res.status).toBe(400);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+});
+
+describe('agent teams (v3 ticket #1)', () => {
+  it('creates a team with fresh member sessions and sends each initialization prompt once', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers) => handlers.onStatusChange('completed');
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'Product Builder',
+        cwd: '/tmp/team-project',
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Lead the team and produce final answers.',
+          },
+          {
+            role: 'docs-writer',
+            agent: 'fake',
+            model: 'fake/fast',
+            responsibility_prompt: 'Write user-facing docs for completed team work.',
+          },
+        ],
+      });
+
+      expect(res.status).toBe(201);
+      const created = await res.json() as {
+        team_id: string;
+        name: string;
+        cwd: string;
+        members: Array<{ role: string; session_id: string; coding_agent: string; model: string | null }>;
+      };
+      expect(created).toMatchObject({ name: 'Product Builder', cwd: '/tmp/team-project' });
+      expect(created.members.map((member) => member.role)).toEqual(['leader', 'docs-writer']);
+      expect(new Set(created.members.map((member) => member.session_id)).size).toBe(2);
+
+      const sessions = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
+      expect(sessions.filter((session) => session.cwd === '/tmp/team-project')).toHaveLength(0);
+      expect(fake.promptCalls).toHaveLength(2);
+      expect(fake.promptCalls[0].input).toContain('You are leader in an agent team.');
+      expect(fake.promptCalls[0].input).toContain('Lead the team and produce final answers.');
+      expect(fake.promptCalls[1].input).toContain('You are docs-writer in an agent team.');
+      expect(fake.promptCalls[1].input).toContain('Write user-facing docs for completed team work.');
+      expect(fake.modelSetCalls).toEqual([{ real_session_id: 'native-/tmp/team-project-2', model_id: 'fake/fast' }]);
+
+      const listed = await (await fetch(`${baseUrl}/api/teams`)).json() as Array<{ team_id: string; members: unknown[] }>;
+      expect(listed).toHaveLength(1);
+      expect(listed[0].team_id).toBe(created.team_id);
+      expect(listed[0].members).toHaveLength(2);
+
+      const promptCountAfterList = fake.promptCalls.length;
+      await fetch(`${baseUrl}/api/teams`);
+      expect(fake.promptCalls).toHaveLength(promptCountAfterList);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('fails team creation when initialization asks for tool permission', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = async (handlers) => {
+        await handlers.onPermissionRequest('init-perm', 'Bash', { command: 'echo no' });
+      };
+
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'Unsafe Init',
+        cwd: '/tmp/team-project',
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Lead the team.',
+          },
+        ],
+      });
+
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({
+        error: 'team member initialization requested permission for Bash',
+      });
+      expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toEqual([]);
     } finally {
       server.close();
       db.close();

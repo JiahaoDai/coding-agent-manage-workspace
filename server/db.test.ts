@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SessionStore } from './db';
 import type { SessionRecord } from '../shared/session';
+import type { TeamMemberRecord, TeamRecord } from '../shared/team';
 
 const temporaryDirs: string[] = [];
 
@@ -24,6 +25,36 @@ function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
     last_error: null,
     create_time: 1,
     modify_time: 1,
+    ...overrides,
+  };
+}
+
+function team(overrides: Partial<TeamRecord> = {}): TeamRecord {
+  return {
+    team_id: 'team-1',
+    name: 'Product Builder',
+    cwd: '/project',
+    status: 'idle',
+    max_parallel_members: 1,
+    create_time: 10,
+    modify_time: 10,
+    ...overrides,
+  };
+}
+
+function member(overrides: Partial<TeamMemberRecord> = {}): TeamMemberRecord {
+  return {
+    member_id: 'member-1',
+    team_id: 'team-1',
+    role: 'leader',
+    coding_agent: 'fake',
+    session_id: 'dashboard-session-1',
+    model: null,
+    responsibility_prompt: 'Lead the team.',
+    status: 'idle',
+    current_delivery_id: null,
+    create_time: 11,
+    modify_time: 11,
     ...overrides,
   };
 }
@@ -75,6 +106,57 @@ describe('SessionStore latest-error persistence', () => {
 
       store.updateStatus('dashboard-session-1', 'completed');
       expect(store.get('dashboard-session-1')).toMatchObject({ status: 'completed', last_error: null });
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe('SessionStore agent team persistence', () => {
+  it('persists teams with members and enforces one team member per session', () => {
+    const db = new Database(':memory:');
+    try {
+      const store = new SessionStore(db);
+      store.insert(session());
+      store.insert(session({ session_id: 'dashboard-session-2', real_session_id: 'native-session-2' }));
+
+      store.insertTeam(team(), [
+        member(),
+        member({
+          member_id: 'member-2',
+          role: 'reviewer',
+          session_id: 'dashboard-session-2',
+          responsibility_prompt: 'Review the work.',
+          model: 'fake/fast',
+          create_time: 12,
+          modify_time: 12,
+        }),
+      ]);
+
+      expect(store.listTeams()).toEqual([
+        {
+          ...team(),
+          members: [
+            member(),
+            member({
+              member_id: 'member-2',
+              role: 'reviewer',
+              session_id: 'dashboard-session-2',
+              responsibility_prompt: 'Review the work.',
+              model: 'fake/fast',
+              create_time: 12,
+              modify_time: 12,
+            }),
+          ],
+        },
+      ]);
+      expect(store.listVisibleSessions()).toEqual([]);
+
+      expect(() =>
+        store.insertTeam(team({ team_id: 'team-2' }), [
+          member({ member_id: 'member-3', team_id: 'team-2', session_id: 'dashboard-session-1' }),
+        ]),
+      ).toThrow();
     } finally {
       db.close();
     }

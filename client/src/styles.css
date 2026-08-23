@@ -240,6 +240,10 @@ button {
   transition: background-color 0.15s var(--ease), border-color 0.15s var(--ease);
 }
 
+.new-session-btn + .new-session-btn {
+  margin-top: -8px;
+}
+
 .new-session-btn:hover {
   background: var(--bg-hover);
 }
@@ -361,6 +365,46 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.team-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.team-list-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.team-list-item:hover,
+.team-list-item.is-selected {
+  background: var(--bg-hover);
+}
+
+.team-list-name {
+  font-size: 0.9rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-list-meta {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
 }
 
 .session-context-menu {
@@ -731,7 +775,8 @@ button {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   min-height: 44px;
   padding: 10px 12px;
   border: 1px solid var(--border-strong);
@@ -741,13 +786,18 @@ button {
   font: inherit;
 }
 
+.field textarea {
+  resize: vertical;
+}
+
 .field input::placeholder {
   color: var(--text-secondary);
   opacity: 0.7;
 }
 
 .field input:focus-visible,
-.field select:focus-visible {
+.field select:focus-visible,
+.field textarea:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
@@ -946,6 +996,129 @@ button {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 4px;
+}
+
+.team-members-field {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.team-member-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+
+.team-member-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.team-overview {
+  width: min(920px, 100%);
+  margin: 0 auto;
+  padding: 32px;
+  overflow-y: auto;
+}
+
+.team-overview-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.team-overview-kicker,
+.team-overview-cwd,
+.team-member-meta,
+.team-member-session,
+.team-member-prompt {
+  color: var(--text-secondary);
+}
+
+.team-overview-kicker {
+  margin: 0 0 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.team-overview h2 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.team-overview-cwd {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.team-status {
+  align-self: flex-start;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
+
+.team-member-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  padding-top: 18px;
+}
+
+.team-member-card {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+
+.team-member-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.team-member-card h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.team-member-card-head span,
+.team-member-meta,
+.team-member-session,
+.team-member-prompt {
+  font-size: 0.84rem;
+}
+
+.team-member-meta,
+.team-member-session,
+.team-member-prompt {
+  margin: 8px 0 0;
+}
+
+.team-member-session {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .team-member-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ============================================================

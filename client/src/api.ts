@@ -1,4 +1,14 @@
-import type { AgentId, CapabilityResult, FsEntry, Message, ModelOption, ResumableSession, SessionRecord } from './types';
+import type {
+  AgentId,
+  CapabilityResult,
+  CreateTeamInput,
+  FsEntry,
+  Message,
+  ModelOption,
+  ResumableSession,
+  SessionRecord,
+  TeamWithMembers,
+} from './types';
 
 export async function listAgents(): Promise<AgentId[]> {
   const res = await fetch('/api/agents');
@@ -25,6 +35,25 @@ export async function listFsChildren(path: string): Promise<FsEntry[]> {
 
 export async function listSessions(): Promise<SessionRecord[]> {
   const res = await fetch('/api/sessions');
+  return res.json();
+}
+
+export async function listTeams(): Promise<TeamWithMembers[]> {
+  const res = await fetch('/api/teams');
+  if (!res.ok) throw new Error(`teams failed: ${res.status}`);
+  return res.json();
+}
+
+export async function createTeam(input: CreateTeamInput): Promise<TeamWithMembers> {
+  const res = await fetch('/api/teams', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `create team failed: ${res.status}`);
+  }
   return res.json();
 }
 

@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
-import { deleteSession, getSessionMessages, getSessionModels, listAgents, listSessions, respondPermission, selectSessionModel, sendMessage } from './api';
+import { deleteSession, getSessionMessages, getSessionModels, listAgents, listSessions, listTeams, respondPermission, selectSessionModel, sendMessage } from './api';
 import { ConversationView } from './components/ConversationView';
 import { CreateSessionForm } from './components/CreateSessionForm';
+import { CreateTeamForm } from './components/CreateTeamForm';
 import { EmptyState } from './components/EmptyState';
 import { PermissionModal } from './components/PermissionModal';
 import { Sidebar } from './components/Sidebar';
+import { TeamOverview } from './components/TeamOverview';
 import {
   applyStreamEvent,
   applyUserMessage,
@@ -14,7 +16,7 @@ import {
   type ConversationMessage,
   type StreamableServerEvent,
 } from './conversation';
-import type { AgentId, ModelOption, PermissionRequest, ServerEvent, SessionRecord } from './types';
+import type { AgentId, ModelOption, PermissionRequest, ServerEvent, SessionRecord, TeamWithMembers } from './types';
 import {
   closePane,
   emptyWorkspace,
@@ -42,9 +44,11 @@ function addSessionIfAbsent(prev: SessionRecord[], session: SessionRecord): Sess
 export function App() {
   const [agents, setAgents] = useState<AgentId[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [teams, setTeams] = useState<TeamWithMembers[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState<'session' | 'team' | null>(null);
+  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     typeof window === 'undefined' ? false : window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true',
   );
@@ -77,6 +81,7 @@ export function App() {
 
   useEffect(() => {
     void listAgents().then(setAgents);
+    void listTeams().then(setTeams);
     void listSessions().then((list) => {
       setSessions(list);
       setWorkspace(restoreWorkspace(typeof window === 'undefined' ? null : window.localStorage.getItem(WORKSPACE_STORAGE_KEY), new Set(list.map((session) => session.session_id))));
@@ -113,6 +118,7 @@ export function App() {
       switch (event.type) {
         case 'session_created':
           setSessions((prev) => addSessionIfAbsent(prev, event.session));
+          void listTeams().then(setTeams);
           break;
         case 'status_change':
           setSessions((prev) =>
@@ -294,13 +300,21 @@ export function App() {
   }
 
   function handleOpen(sessionId: string) {
-    setCreating(false);
+    setCreating(null);
+    setSelectedTeamId(null);
     setWorkspace((prev) => openInActivePane(prev, sessionId));
   }
 
   function handleOpenInSplit(sessionId: string) {
-    setCreating(false);
+    setCreating(null);
+    setSelectedTeamId(null);
     setWorkspace((prev) => openInSplitPane(prev, sessionId));
+  }
+
+  function handleSelectTeam(teamId: string) {
+    setCreating(null);
+    setSelectedTeamId(teamId);
+    setWorkspace(emptyWorkspace);
   }
 
   function handleClosePane(paneId: PaneId) {
@@ -336,6 +350,7 @@ export function App() {
   }
 
   const selectedId = workspace.panels.find((panel) => panel.paneId === workspace.activePane)?.sessionId ?? null;
+  const selectedTeam = selectedTeamId ? teams.find((team) => team.team_id === selectedTeamId) ?? null : null;
   const visiblePanels = workspace.panels
     .map((panel) => ({ panel, session: sessions.find((s) => s.session_id === panel.sessionId) ?? null }))
     .filter((item): item is { panel: { paneId: PaneId; sessionId: string }; session: SessionRecord } => item.session !== null);
@@ -372,28 +387,50 @@ export function App() {
       ) : (
         <Sidebar
           sessions={sessions}
+          teams={teams}
           connected={connected}
           selectedId={selectedId}
+          selectedTeamId={selectedTeamId}
           onSelect={handleOpen}
+          onSelectTeam={handleSelectTeam}
           onOpenInSplit={handleOpenInSplit}
           onDelete={handleDelete}
           onNewSession={() => {
-            setCreating(true);
+            setCreating('session');
+            setSelectedTeamId(null);
+          }}
+          onNewTeam={() => {
+            setCreating('team');
+            setSelectedTeamId(null);
           }}
           onToggle={() => setSidebarCollapsed(true)}
         />
       )}
       <main className="main">
-        {creating ? (
+        {creating === 'session' ? (
           <CreateSessionForm
             agents={agents}
             onCreated={(session) => {
               setSessions((prev) => addSessionIfAbsent(prev, session));
-              setCreating(false);
+              setCreating(null);
+              setSelectedTeamId(null);
               setWorkspace((prev) => openInActivePane(prev, session.session_id));
             }}
-            onCancel={() => setCreating(false)}
+            onCancel={() => setCreating(null)}
           />
+        ) : creating === 'team' ? (
+          <CreateTeamForm
+            agents={agents}
+            onCreated={(team) => {
+              setTeams((prev) => [team, ...prev.filter((item) => item.team_id !== team.team_id)]);
+              setCreating(null);
+              setSelectedTeamId(team.team_id);
+              void listSessions().then(setSessions);
+            }}
+            onCancel={() => setCreating(null)}
+          />
+        ) : selectedTeam ? (
+          <TeamOverview team={selectedTeam} />
         ) : visiblePanels.length > 0 ? (
           <div
             className={`workspace workspace-${visiblePanels.length}`}
@@ -440,7 +477,7 @@ export function App() {
             })}
           </div>
         ) : (
-          <EmptyState onNewSession={() => setCreating(true)} />
+          <EmptyState onNewSession={() => setCreating('session')} />
         )}
       </main>
 

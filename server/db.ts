@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import type { SessionRecord, SessionStatus } from '../shared/session';
+import type { TeamMemberRecord, TeamRecord, TeamWithMembers } from '../shared/team';
 
 /**
  * The app's own metadata store. Holds one row per session — message bodies are
@@ -24,6 +25,34 @@ export class SessionStore {
 
       CREATE INDEX IF NOT EXISTS idx_session_agent_status_cwd
         ON session (coding_agent, status, cwd);
+
+      CREATE TABLE IF NOT EXISTS team (
+        team_id              TEXT PRIMARY KEY,
+        name                 TEXT NOT NULL,
+        cwd                  TEXT NOT NULL,
+        status               TEXT NOT NULL,
+        max_parallel_members INTEGER NOT NULL,
+        create_time          INTEGER NOT NULL,
+        modify_time          INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS team_member (
+        member_id             TEXT PRIMARY KEY,
+        team_id               TEXT NOT NULL,
+        role                  TEXT NOT NULL,
+        coding_agent          TEXT NOT NULL,
+        session_id            TEXT NOT NULL UNIQUE,
+        model                 TEXT,
+        responsibility_prompt TEXT NOT NULL,
+        status                TEXT NOT NULL,
+        current_delivery_id   TEXT,
+        create_time           INTEGER NOT NULL,
+        modify_time           INTEGER NOT NULL,
+        UNIQUE(team_id, role)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_team_member_team
+        ON team_member (team_id);
     `);
 
     // `CREATE TABLE IF NOT EXISTS` cannot amend installations created before
@@ -54,6 +83,18 @@ export class SessionStore {
       .prepare(
         `SELECT session_id, coding_agent, real_session_id, name, cwd, status, model, last_error, create_time, modify_time
          FROM session ORDER BY modify_time DESC`,
+      )
+      .all() as SessionRow[];
+    return rows.map(toSession);
+  }
+
+  listVisibleSessions(): SessionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT session_id, coding_agent, real_session_id, name, cwd, status, model, last_error, create_time, modify_time
+         FROM session
+         WHERE session_id NOT IN (SELECT session_id FROM team_member)
+         ORDER BY modify_time DESC`,
       )
       .all() as SessionRow[];
     return rows.map(toSession);
@@ -97,6 +138,69 @@ export class SessionStore {
   delete(session_id: string): void {
     this.db.prepare(`DELETE FROM session WHERE session_id = ?`).run(session_id);
   }
+
+  isTeamMemberSession(session_id: string): boolean {
+    const row = this.db
+      .prepare(`SELECT 1 FROM team_member WHERE session_id = ? LIMIT 1`)
+      .get(session_id) as { 1: number } | undefined;
+    return row !== undefined;
+  }
+
+  insertTeam(team: TeamRecord, members: TeamMemberRecord[]): void {
+    const insert = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO team
+             (team_id, name, cwd, status, max_parallel_members, create_time, modify_time)
+           VALUES
+             (@team_id, @name, @cwd, @status, @max_parallel_members, @create_time, @modify_time)`,
+        )
+        .run(team);
+
+      const insertMember = this.db.prepare(
+        `INSERT INTO team_member
+           (member_id, team_id, role, coding_agent, session_id, model, responsibility_prompt,
+            status, current_delivery_id, create_time, modify_time)
+         VALUES
+           (@member_id, @team_id, @role, @coding_agent, @session_id, @model, @responsibility_prompt,
+            @status, @current_delivery_id, @create_time, @modify_time)`,
+      );
+      for (const member of members) insertMember.run(member);
+    });
+
+    insert();
+  }
+
+  listTeams(): TeamWithMembers[] {
+    const teams = this.db
+      .prepare(
+        `SELECT team_id, name, cwd, status, max_parallel_members, create_time, modify_time
+         FROM team ORDER BY modify_time DESC`,
+      )
+      .all() as TeamRow[];
+    return teams.map((team) => ({ ...toTeam(team), members: this.listTeamMembers(team.team_id) }));
+  }
+
+  getTeam(team_id: string): TeamWithMembers | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT team_id, name, cwd, status, max_parallel_members, create_time, modify_time
+         FROM team WHERE team_id = ?`,
+      )
+      .get(team_id) as TeamRow | undefined;
+    return row ? { ...toTeam(row), members: this.listTeamMembers(team_id) } : undefined;
+  }
+
+  private listTeamMembers(team_id: string): TeamMemberRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT member_id, team_id, role, coding_agent, session_id, model, responsibility_prompt,
+                status, current_delivery_id, create_time, modify_time
+         FROM team_member WHERE team_id = ? ORDER BY create_time ASC`,
+      )
+      .all(team_id) as TeamMemberRow[];
+    return rows.map(toTeamMember);
+  }
 }
 
 interface SessionRow {
@@ -113,5 +217,37 @@ interface SessionRow {
 }
 
 function toSession(row: SessionRow): SessionRecord {
+  return { ...row };
+}
+
+interface TeamRow {
+  team_id: string;
+  name: string;
+  cwd: string;
+  status: TeamRecord['status'];
+  max_parallel_members: number;
+  create_time: number;
+  modify_time: number;
+}
+
+interface TeamMemberRow {
+  member_id: string;
+  team_id: string;
+  role: string;
+  coding_agent: string;
+  session_id: string;
+  model: string | null;
+  responsibility_prompt: string;
+  status: TeamMemberRecord['status'];
+  current_delivery_id: string | null;
+  create_time: number;
+  modify_time: number;
+}
+
+function toTeam(row: TeamRow): TeamRecord {
+  return { ...row };
+}
+
+function toTeamMember(row: TeamMemberRow): TeamMemberRecord {
   return { ...row };
 }

@@ -1,26 +1,35 @@
 import { useState } from 'react';
 import { DEFAULT_FILTERS, filterSessions } from '../sessionFilters';
-import type { SessionRecord } from '../types';
+import type { SessionRecord, TeamWithMembers } from '../types';
 import { SessionFiltersBar } from './SessionFiltersBar';
 import { SessionList } from './SessionList';
+import { TeamList } from './TeamList';
 
 export function Sidebar({
   sessions,
+  teams,
   connected,
   selectedId,
+  selectedTeamId,
   onSelect,
+  onSelectTeam,
   onOpenInSplit,
   onDelete,
   onNewSession,
+  onNewTeam,
   onToggle,
 }: {
   sessions: SessionRecord[];
+  teams: TeamWithMembers[];
   connected: boolean;
   selectedId: string | null;
+  selectedTeamId: string | null;
   onSelect: (sessionId: string) => void;
+  onSelectTeam: (teamId: string) => void;
   onOpenInSplit: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
   onNewSession: () => void;
+  onNewTeam: () => void;
   onToggle: () => void;
 }) {
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
@@ -72,6 +81,25 @@ export function Sidebar({
         </svg>
         New session
       </button>
+      <button type="button" className="new-session-btn" onClick={onNewTeam}>
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+        </svg>
+        New team
+      </button>
+
+      <TeamList teams={teams} selectedId={selectedTeamId} onSelect={onSelectTeam} />
 
       <SessionFiltersBar sessions={sessions} filters={filters} onChange={setFilters} />
       <SessionList

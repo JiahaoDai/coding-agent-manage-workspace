@@ -8,6 +8,7 @@ import { PermissionBroker } from './permission';
 import type { SseHub } from './sse';
 import type { PromptHandlers } from '../shared/adapter';
 import type { ResumableSession, SessionRecord } from '../shared/session';
+import type { CreateTeamInput, TeamMemberInput, TeamMemberRecord, TeamRecord } from '../shared/team';
 
 export interface AppDeps {
   store: SessionStore;
@@ -40,7 +41,83 @@ export function createApp(deps: AppDeps): Hono {
     }
   });
 
-  app.get('/api/sessions', (c) => c.json(deps.store.list()));
+  app.get('/api/sessions', (c) => c.json(deps.store.listVisibleSessions()));
+
+  app.get('/api/teams', (c) => c.json(deps.store.listTeams()));
+
+  app.get('/api/teams/:id', (c) => {
+    const team = deps.store.getTeam(c.req.param('id'));
+    return team ? c.json(team) : c.json({ error: 'team not found' }, 404);
+  });
+
+  app.post('/api/teams', async (c) => {
+    const body = (await c.req.json().catch(() => null)) as Partial<CreateTeamInput> | null;
+    const validation = validateCreateTeam(body);
+    if ('error' in validation) return c.json({ error: validation.error }, 400);
+
+    const { name, cwd, members } = validation.value;
+    const now = Date.now();
+    const team: TeamRecord = {
+      team_id: randomUUID(),
+      name,
+      cwd,
+      status: 'idle',
+      max_parallel_members: 1,
+      create_time: now,
+      modify_time: now,
+    };
+    const sessions: SessionRecord[] = [];
+    const teamMembers: TeamMemberRecord[] = [];
+
+    try {
+      for (const member of members) {
+        const adapter = deps.adapters.get(member.agent);
+        if (!adapter) return c.json({ error: `unknown agent: ${member.agent}` }, 400);
+
+        const session_id = randomUUID();
+        const { real_session_id } = await adapter.createSession(cwd, { name: `${name} / ${member.role}` });
+        if (member.model !== null) {
+          const selected = await adapter.setModel(real_session_id, cwd, member.model);
+          if (!selected.supported) return c.json({ error: selected.reason }, 409);
+        }
+
+        await adapter.prompt(real_session_id, cwd, memberInitializationPrompt(member), initializationHandlers());
+
+        sessions.push({
+          session_id,
+          coding_agent: member.agent,
+          real_session_id,
+          name: `${name} / ${member.role}`,
+          cwd,
+          status: 'completed',
+          model: member.model,
+          last_error: null,
+          create_time: now,
+          modify_time: now,
+        });
+        teamMembers.push({
+          member_id: randomUUID(),
+          team_id: team.team_id,
+          role: member.role,
+          coding_agent: member.agent,
+          session_id,
+          model: member.model,
+          responsibility_prompt: member.responsibility_prompt,
+          status: 'idle',
+          current_delivery_id: null,
+          create_time: now + teamMembers.length,
+          modify_time: now + teamMembers.length,
+        });
+      }
+
+      for (const session of sessions) deps.store.insert(session);
+      deps.store.insertTeam(team, teamMembers);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 422);
+    }
+
+    return c.json(deps.store.getTeam(team.team_id), 201);
+  });
 
   app.post('/api/sessions', async (c) => {
     const body = (await c.req.json()) as { cwd?: unknown; agent?: unknown; name?: unknown } | null;
@@ -81,6 +158,9 @@ export function createApp(deps: AppDeps): Hono {
     const session_id = c.req.param('id');
     const session = deps.store.get(session_id);
     if (!session) return c.json({ error: 'session not found' }, 404);
+    if (deps.store.isTeamMemberSession(session_id)) {
+      return c.json({ error: 'team member sessions are managed by their team' }, 409);
+    }
 
     deps.store.delete(session_id);
     deps.sse.broadcast({ type: 'session_removed', session_id });
@@ -330,4 +410,75 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   return app;
+}
+
+function validateCreateTeam(
+  body: Partial<CreateTeamInput> | null,
+): { value: CreateTeamInput } | { error: string } {
+  if (!body || typeof body.name !== 'string' || body.name.trim() === '') return { error: 'name is required' };
+  if (typeof body.cwd !== 'string' || body.cwd.trim() === '') return { error: 'cwd is required' };
+  if (!Array.isArray(body.members) || body.members.length === 0) return { error: 'members are required' };
+
+  const roles = new Set<string>();
+  const members: TeamMemberInput[] = [];
+  for (const raw of body.members) {
+    if (!raw || typeof raw !== 'object') return { error: 'member must be an object' };
+    const member = raw as Partial<TeamMemberInput>;
+    if (typeof member.role !== 'string' || member.role.trim() === '') return { error: 'member role is required' };
+    if (typeof member.agent !== 'string' || member.agent.trim() === '') return { error: 'member agent is required' };
+    if (member.model !== null && member.model !== undefined && typeof member.model !== 'string') {
+      return { error: 'member model must be a string or null' };
+    }
+    if (typeof member.responsibility_prompt !== 'string' || member.responsibility_prompt.trim() === '') {
+      return { error: 'member responsibility_prompt is required' };
+    }
+    const role = member.role.trim();
+    if (roles.has(role)) return { error: `duplicate member role: ${role}` };
+    roles.add(role);
+    members.push({
+      role,
+      agent: member.agent.trim(),
+      model: member.model ?? null,
+      responsibility_prompt: member.responsibility_prompt.trim(),
+    });
+  }
+  if (!roles.has('leader')) return { error: 'team requires a leader member' };
+
+  return { value: { name: body.name.trim(), cwd: body.cwd.trim(), members } };
+}
+
+function memberInitializationPrompt(member: TeamMemberInput): string {
+  return [
+    `You are ${member.role} in an agent team.`,
+    '',
+    'Your role:',
+    member.responsibility_prompt,
+    '',
+    'Collaboration rules:',
+    '- You receive tasks from the team orchestrator.',
+    '- Treat each incoming delivery as the next task in this same team session.',
+    '- Do not assume a previous task should be repeated unless the new delivery says so.',
+    '- Report results concisely for the leader.',
+    '',
+    'Output format:',
+    '- RESULT: ...',
+    '- NEED_INFO: ...',
+    '- MESSAGE_TO reviewer: ...',
+    '- PROPOSAL: ...',
+    '- FAILED: ...',
+  ].join('\n');
+}
+
+function initializationHandlers(): PromptHandlers {
+  return {
+    onTextDelta: () => {},
+    onToolCallStart: () => {},
+    onToolCallEnd: () => {},
+    onThinkingDelta: () => {},
+    onStatusNote: () => {},
+    onStatusChange: () => {},
+    onPermissionRequest: async (_request_id, tool_name) => {
+      throw new Error(`team member initialization requested permission for ${tool_name}`);
+    },
+  };
 }
