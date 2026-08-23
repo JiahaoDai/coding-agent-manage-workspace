@@ -383,9 +383,38 @@ describe('agent teams (v3 ticket #1)', () => {
 
       expect(res.status).toBe(422);
       expect(await res.json()).toEqual({
-        error: 'team member initialization requested permission for Bash',
+        error: 'team member initialization for leader requested permission for Bash',
       });
       expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toEqual([]);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('rejects an unavailable member model before creating native sessions', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'Bad Model',
+        cwd: '/tmp/team-project',
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: 'deepseek-v4-flash',
+            responsibility_prompt: 'Lead the team.',
+          },
+        ],
+      });
+
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({
+        error: 'model is not available for member leader (fake): deepseek-v4-flash',
+        available_models: [{ id: 'fake/fast', label: 'Fake Fast', provider: 'fake' }],
+      });
+      expect(fake.created).toEqual([]);
+      expect(fake.promptCalls).toEqual([]);
     } finally {
       server.close();
       db.close();

@@ -72,16 +72,33 @@ export function createApp(deps: AppDeps): Hono {
     try {
       for (const member of members) {
         const adapter = deps.adapters.get(member.agent);
-        if (!adapter) return c.json({ error: `unknown agent: ${member.agent}` }, 400);
+        if (!adapter) return c.json({ error: `unknown agent for member ${member.role}: ${member.agent}` }, 400);
+        if (member.model !== null) {
+          const models = await adapter.listModels(cwd);
+          if (!models.supported) return c.json({ error: `model selection is unavailable for member ${member.role}: ${models.reason}` }, 409);
+          if (!models.value.some((model) => model.id === member.model)) {
+            return c.json(
+              {
+                error: `model is not available for member ${member.role} (${member.agent}): ${member.model}`,
+                available_models: models.value,
+              },
+              422,
+            );
+          }
+        }
+      }
+
+      for (const member of members) {
+        const adapter = deps.adapters.get(member.agent)!;
 
         const session_id = randomUUID();
         const { real_session_id } = await adapter.createSession(cwd, { name: `${name} / ${member.role}` });
         if (member.model !== null) {
           const selected = await adapter.setModel(real_session_id, cwd, member.model);
-          if (!selected.supported) return c.json({ error: selected.reason }, 409);
+          if (!selected.supported) return c.json({ error: `model selection failed for member ${member.role}: ${selected.reason}` }, 409);
         }
 
-        await adapter.prompt(real_session_id, cwd, memberInitializationPrompt(member), initializationHandlers());
+        await adapter.prompt(real_session_id, cwd, memberInitializationPrompt(member), initializationHandlers(member.role));
 
         sessions.push({
           session_id,
@@ -469,7 +486,7 @@ function memberInitializationPrompt(member: TeamMemberInput): string {
   ].join('\n');
 }
 
-function initializationHandlers(): PromptHandlers {
+function initializationHandlers(role: string): PromptHandlers {
   return {
     onTextDelta: () => {},
     onToolCallStart: () => {},
@@ -478,7 +495,7 @@ function initializationHandlers(): PromptHandlers {
     onStatusNote: () => {},
     onStatusChange: () => {},
     onPermissionRequest: async (_request_id, tool_name) => {
-      throw new Error(`team member initialization requested permission for ${tool_name}`);
+      throw new Error(`team member initialization for ${role} requested permission for ${tool_name}`);
     },
   };
 }
