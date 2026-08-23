@@ -377,21 +377,39 @@ button {
 }
 
 .team-list-item {
+  position: relative;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: stretch;
   width: 100%;
-  padding: 10px 12px;
-  border: none;
   border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
+  transition: background-color 0.15s var(--ease);
+}
+
+.team-list-item-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 30px 10px 12px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   text-align: left;
+  cursor: pointer;
 }
 
 .team-list-item:hover,
 .team-list-item.is-selected {
   background: var(--bg-hover);
+}
+
+.team-list-item:hover .team-list-delete,
+.team-list-item:focus-within .team-list-delete {
+  opacity: 1;
 }
 
 .team-list-name {
@@ -1041,14 +1059,6 @@ button {
   gap: 18px;
   padding-bottom: 18px;
   border-bottom: 1px solid var(--border);
-}
-
-.team-overview-actions {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .team-overview-kicker,

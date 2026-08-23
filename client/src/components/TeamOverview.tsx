@@ -3,11 +3,9 @@ import type { TeamWithMembers } from '../types';
 export function TeamOverview({
   team,
   deleteError,
-  onDelete,
 }: {
   team: TeamWithMembers;
   deleteError?: string | null;
-  onDelete: () => void;
 }) {
   return (
     <section className="team-overview" aria-labelledby="team-overview-title">
@@ -19,12 +17,7 @@ export function TeamOverview({
             {team.cwd}
           </p>
         </div>
-        <div className="team-overview-actions">
-          <span className="team-status">{team.status}</span>
-          <button type="button" className="btn btn-deny" onClick={onDelete}>
-            Delete team
-          </button>
-        </div>
+        <span className="team-status">{team.status}</span>
       </div>
 
       {deleteError && (

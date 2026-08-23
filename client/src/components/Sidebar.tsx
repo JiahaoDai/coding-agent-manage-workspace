@@ -15,6 +15,7 @@ export function Sidebar({
   onSelectTeam,
   onOpenInSplit,
   onDelete,
+  onDeleteTeam,
   onNewSession,
   onNewTeam,
   onToggle,
@@ -28,6 +29,7 @@ export function Sidebar({
   onSelectTeam: (teamId: string) => void;
   onOpenInSplit: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
+  onDeleteTeam: (teamId: string) => void;
   onNewSession: () => void;
   onNewTeam: () => void;
   onToggle: () => void;
@@ -99,7 +101,12 @@ export function Sidebar({
         New team
       </button>
 
-      <TeamList teams={teams} selectedId={selectedTeamId} onSelect={onSelectTeam} />
+      <TeamList
+        teams={teams}
+        selectedId={selectedTeamId}
+        onSelect={onSelectTeam}
+        onDelete={onDeleteTeam}
+      />
 
       <SessionFiltersBar sessions={sessions} filters={filters} onChange={setFilters} />
       <SessionList

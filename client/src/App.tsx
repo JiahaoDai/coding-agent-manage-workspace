@@ -409,6 +409,7 @@ export function App() {
           onSelectTeam={handleSelectTeam}
           onOpenInSplit={handleOpenInSplit}
           onDelete={handleDelete}
+          onDeleteTeam={(teamId) => void handleDeleteTeam(teamId)}
           onNewSession={() => {
             setCreating('session');
             setSelectedTeamId(null);
@@ -447,7 +448,6 @@ export function App() {
           <TeamOverview
             team={selectedTeam}
             deleteError={teamDeleteError}
-            onDelete={() => void handleDeleteTeam(selectedTeam.team_id)}
           />
         ) : visiblePanels.length > 0 ? (
           <div

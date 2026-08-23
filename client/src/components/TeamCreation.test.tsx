@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { CreateTeamForm } from './CreateTeamForm';
+import { TeamList } from './TeamList';
 import { TeamOverview } from './TeamOverview';
 import type { TeamWithMembers } from '../types';
 
@@ -45,13 +46,23 @@ describe('team creation UI', () => {
   });
 
   it('renders a created team with its fresh member sessions', () => {
-    const markup = renderToStaticMarkup(<TeamOverview team={team} onDelete={() => {}} />);
+    const markup = renderToStaticMarkup(<TeamOverview team={team} />);
 
     expect(markup).toContain('Product Builder');
     expect(markup).toContain('/project');
     expect(markup).toContain('leader');
     expect(markup).toContain('fake · default model');
     expect(markup).toContain('session-1');
-    expect(markup).toContain('Delete team');
+    expect(markup).not.toContain('Delete team');
+  });
+
+  it('renders the team delete action in the sidebar list', () => {
+    const markup = renderToStaticMarkup(
+      <TeamList teams={[team]} selectedId="team-1" onSelect={() => {}} onDelete={() => {}} />,
+    );
+
+    expect(markup).toContain('Product Builder');
+    expect(markup).toContain('Delete Product Builder');
+    expect(markup).toContain('team-list-delete');
   });
 });
