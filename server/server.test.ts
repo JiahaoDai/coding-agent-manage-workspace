@@ -208,6 +208,21 @@ async function collectEvents(
 }
 
 describe('walking skeleton', () => {
+  it('lists models for an agent before a session exists', async () => {
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const res = await fetch(`${baseUrl}/api/agents/fake/models?cwd=${encodeURIComponent('/tmp/project')}`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        supported: true,
+        value: [{ id: 'fake/fast', label: 'Fake Fast', provider: 'fake' }],
+      });
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
   it('creates a session and lists it with name, agent, directory, and status', async () => {
     const { db, server, baseUrl } = await startServer();
     try {

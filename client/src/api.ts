@@ -15,6 +15,15 @@ export async function listAgents(): Promise<AgentId[]> {
   return res.json();
 }
 
+export async function listAgentModels(agent: AgentId, cwd: string): Promise<CapabilityResult<ModelOption[]>> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(agent)}/models?cwd=${encodeURIComponent(cwd)}`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `agent models failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 /** The file tree's root directory (configurable on the server; default ~). */
 export async function getFsRoot(): Promise<{ root: string; name: string }> {
   const res = await fetch('/api/fs/root');

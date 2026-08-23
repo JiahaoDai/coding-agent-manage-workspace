@@ -774,6 +774,11 @@ button {
   color: var(--text-secondary);
 }
 
+.field-help {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
 .field input,
 .field select,
 .field textarea {

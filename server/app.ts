@@ -27,6 +27,17 @@ export function createApp(deps: AppDeps): Hono {
 
   app.get('/api/agents', (c) => c.json(deps.adapters.list()));
 
+  app.get('/api/agents/:agent/models', async (c) => {
+    const agent = c.req.param('agent');
+    const cwd = c.req.query('cwd') ?? '';
+    if (!cwd) return c.json({ error: 'cwd is required' }, 400);
+
+    const adapter = deps.adapters.get(agent);
+    if (!adapter) return c.json({ error: `unknown agent: ${agent}` }, 400);
+
+    return c.json(await adapter.listModels(cwd));
+  });
+
   app.get('/api/fs/root', (c) => c.json({ root: fs.root, name: fs.rootName() }));
 
   // One level of the file tree at a time (lazy). `path` is relative to the

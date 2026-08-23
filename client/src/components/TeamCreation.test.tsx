@@ -40,6 +40,7 @@ describe('team creation UI', () => {
     expect(markup).toContain('leader');
     expect(markup).toContain('backend-coder');
     expect(markup).toContain('Select an agent');
+    expect(markup).toContain('Select a directory first');
     expect(markup).toContain('Role prompt');
   });
 
