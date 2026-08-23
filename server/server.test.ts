@@ -476,6 +476,116 @@ describe('agent teams (v3 ticket #1)', () => {
   });
 });
 
+describe('agent team leader-only run (v3 ticket #3)', () => {
+  it('creates a run, delivers the request to leader, streams output, and completes with final', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta('{"type":"final","summary":"done",');
+          handlers.onTextDelta('"result":"Leader handled the request."}');
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const createdTeam = await post(baseUrl, '/api/teams', {
+        name: 'Product Builder',
+        cwd: '/tmp/team-project',
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Lead the team and produce final answers.',
+          },
+        ],
+      });
+      expect(createdTeam.status).toBe(201);
+      const team = await createdTeam.json() as {
+        team_id: string;
+        members: Array<{ member_id: string; session_id: string }>;
+      };
+      expect(fake.promptCalls).toHaveLength(1);
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Build the settings page.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.some((e) => e.type === 'team_run_completed'),
+      );
+
+      expect(events.map((event) => event.type)).toContain('team_run_created');
+      expect(events.map((event) => event.type)).toContain('team_delivery_status_change');
+      expect(events.map((event) => event.type)).toContain('team_text_delta');
+      expect(events.map((event) => event.type)).toContain('team_run_completed');
+
+      const created = events.find(
+        (event): event is Extract<ServerEvent, { type: 'team_run_created' }> =>
+          event.type === 'team_run_created',
+      );
+      expect(created).toBeTruthy();
+      expect(created!.user_message.content).toBe('Build the settings page.');
+      expect(created!.delivery.to_member_id).toBe(team.members[0].member_id);
+
+      const streamed = events
+        .filter((event): event is Extract<ServerEvent, { type: 'team_text_delta' }> => event.type === 'team_text_delta')
+        .map((event) => event.text)
+        .join('');
+      expect(streamed).toBe('{"type":"final","summary":"done","result":"Leader handled the request."}');
+
+      const completed = events.find(
+        (event): event is Extract<ServerEvent, { type: 'team_run_completed' }> =>
+          event.type === 'team_run_completed',
+      );
+      expect(completed!.final_message.content).toBe('Leader handled the request.');
+      expect(completed!.run.status).toBe('completed');
+
+      expect(fake.promptCalls).toHaveLength(2);
+      expect(fake.promptCalls[1]).toMatchObject({
+        real_session_id: 'native-/tmp/team-project',
+        cwd: '/tmp/team-project',
+      });
+      expect(fake.promptCalls[1].input).toContain('User request:');
+      expect(fake.promptCalls[1].input).toContain('Build the settings page.');
+      expect(fake.promptCalls[1].input).not.toContain('Collaboration rules:');
+      expect(fake.promptCalls[1].input).not.toContain('You are leader in an agent team.');
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { status: string };
+        messages: Array<{ kind: string; content: string }>;
+        deliveries: Array<{ status: string; to_member_id: string }>;
+      }>;
+      expect(runs).toHaveLength(1);
+      expect(runs[0].run.status).toBe('completed');
+      expect(runs[0].messages.map((message) => message.kind)).toEqual(['user_request', 'final']);
+      expect(runs[0].messages[1].content).toBe('Leader handled the request.');
+      expect(runs[0].deliveries).toEqual([
+        expect.objectContaining({ status: 'done', to_member_id: team.members[0].member_id }),
+      ]);
+
+      const teams = await (await fetch(`${baseUrl}/api/teams`)).json() as Array<{
+        team_id: string;
+        status: string;
+        members: Array<{ status: string; current_delivery_id: string | null }>;
+      }>;
+      expect(teams[0]).toMatchObject({ team_id: team.team_id, status: 'idle' });
+      expect(teams[0].members[0]).toMatchObject({ status: 'idle', current_delivery_id: null });
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+});
+
 describe('streaming conversation (ticket #2)', () => {
   it('lists available models and persists a selection only after the adapter accepts it', async () => {
     const { db, fake, server, baseUrl } = await startServer();

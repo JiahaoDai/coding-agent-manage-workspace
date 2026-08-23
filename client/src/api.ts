@@ -7,6 +7,7 @@ import type {
   ModelOption,
   ResumableSession,
   SessionRecord,
+  TeamRunWithItems,
   TeamWithMembers,
 } from './types';
 
@@ -72,6 +73,28 @@ export async function deleteTeam(teamId: string): Promise<void> {
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
     throw new Error(body?.error ?? `delete team failed: ${res.status}`);
   }
+}
+
+export async function listTeamRuns(teamId: string): Promise<TeamRunWithItems[]> {
+  const res = await fetch(`/api/teams/${teamId}/runs`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `team runs failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function sendTeamRequest(teamId: string, text: string): Promise<TeamRunWithItems> {
+  const res = await fetch(`/api/teams/${teamId}/runs`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `team request failed: ${res.status}`);
+  }
+  return res.json();
 }
 
 export async function createSession(input: {

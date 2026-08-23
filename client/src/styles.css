@@ -1249,6 +1249,14 @@ button {
   background: var(--bg-surface);
 }
 
+.team-run-event-final {
+  border-color: rgba(16, 163, 127, 0.35);
+}
+
+.team-run-event-error {
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
 .team-run-event-head {
   display: flex;
   align-items: center;

@@ -61,7 +61,7 @@ describe('TeamChatView', () => {
       <TeamChatView
         team={team}
         draft=""
-        requests={[]}
+        items={[]}
         onDraftChange={() => {}}
         onSubmit={() => {}}
       />,
@@ -84,7 +84,35 @@ describe('TeamChatView', () => {
       <TeamChatView
         team={team}
         draft=""
-        requests={[{ request_id: 'request-1', text: 'Build the settings page.', create_time: 1 }]}
+        items={[
+          {
+            item_id: 'message-1',
+            run_id: 'run-1',
+            kind: 'user_request',
+            label: 'User request',
+            text: 'Build the settings page.',
+            status: 'running',
+            create_time: 1,
+          },
+          {
+            item_id: 'stream-1',
+            run_id: 'run-1',
+            kind: 'leader_response',
+            label: 'Leader response',
+            text: '{"type":"final"',
+            status: 'running',
+            create_time: 2,
+          },
+          {
+            item_id: 'final-1',
+            run_id: 'run-1',
+            kind: 'final',
+            label: 'Final result',
+            text: 'Settings page is ready.',
+            status: 'completed',
+            create_time: 3,
+          },
+        ]}
         onDraftChange={() => {}}
         onSubmit={() => {}}
       />,
@@ -92,7 +120,11 @@ describe('TeamChatView', () => {
 
     expect(markup).toContain('User request');
     expect(markup).toContain('Build the settings page.');
-    expect(markup).toContain('queued');
+    expect(markup).toContain('Leader response');
+    expect(markup).toContain('{&quot;type&quot;:&quot;final&quot;');
+    expect(markup).toContain('Final result');
+    expect(markup).toContain('Settings page is ready.');
+    expect(markup).toContain('completed');
   });
 
   it('handles loading and missing-team states cleanly', () => {

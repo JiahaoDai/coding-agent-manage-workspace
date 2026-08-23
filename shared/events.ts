@@ -1,5 +1,11 @@
 import type { ShellCommandResult } from './adapter';
 import type { SessionRecord, SessionStatus } from './session';
+import type {
+  TeamDeliveryStatus,
+  TeamMessageDeliveryRecord,
+  TeamMessageRecord,
+  TeamRunRecord,
+} from './team';
 
 /**
  * Events streamed downstream (server → client) over the single multiplexed SSE
@@ -18,4 +24,44 @@ export type ServerEvent =
   | { type: 'permission_response'; session_id: string; request_id: string; decision: 'allow' | 'deny' }
   | { type: 'shell_result'; session_id: string; result: ShellCommandResult }
   | { type: 'session_removed'; session_id: string }
+  | {
+      type: 'team_run_created';
+      session_id?: undefined;
+      team_id: string;
+      run: TeamRunRecord;
+      user_message: TeamMessageRecord;
+      delivery: TeamMessageDeliveryRecord;
+    }
+  | {
+      type: 'team_delivery_status_change';
+      session_id?: undefined;
+      team_id: string;
+      run_id: string;
+      delivery_id: string;
+      member_id: string;
+      status: TeamDeliveryStatus;
+    }
+  | {
+      type: 'team_text_delta';
+      session_id?: undefined;
+      team_id: string;
+      run_id: string;
+      delivery_id: string;
+      member_id: string;
+      text: string;
+    }
+  | {
+      type: 'team_run_completed';
+      session_id?: undefined;
+      team_id: string;
+      run: TeamRunRecord;
+      final_message: TeamMessageRecord;
+    }
+  | {
+      type: 'team_run_failed';
+      session_id?: undefined;
+      team_id: string;
+      run: TeamRunRecord;
+      error_message: TeamMessageRecord;
+    }
   | { type: 'error'; session_id: string; message: string };

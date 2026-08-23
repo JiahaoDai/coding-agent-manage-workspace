@@ -1,9 +1,13 @@
 import { useEffect, useRef, type FormEvent, type KeyboardEvent } from 'react';
 import type { TeamWithMembers } from '../types';
 
-export interface TeamTimelineRequest {
-  request_id: string;
+export interface TeamTimelineItem {
+  item_id: string;
+  run_id: string;
+  kind: 'user_request' | 'leader_response' | 'final' | 'error';
+  label: string;
   text: string;
+  status?: string;
   create_time: number;
 }
 
@@ -12,7 +16,8 @@ export function TeamChatView({
   loading = false,
   deleteError = null,
   draft,
-  requests = [],
+  items = [],
+  sending = false,
   onDraftChange,
   onSubmit,
 }: {
@@ -20,12 +25,14 @@ export function TeamChatView({
   loading?: boolean;
   deleteError?: string | null;
   draft: string;
-  requests?: TeamTimelineRequest[];
+  items?: TeamTimelineItem[];
+  sending?: boolean;
   onDraftChange: (text: string) => void;
   onSubmit: (text: string) => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const canSubmit = draft.trim() !== '' && team !== null && !loading;
+  const teamRunning = team?.status === 'running';
+  const canSubmit = draft.trim() !== '' && team !== null && !loading && !sending && !teamRunning;
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -113,19 +120,19 @@ export function TeamChatView({
             <h3>Run timeline</h3>
           </div>
           <div className="team-run-timeline" aria-live="polite">
-            {requests.length === 0 ? (
+            {items.length === 0 ? (
               <p className="conversation-empty">No team runs yet.</p>
             ) : (
-              requests.map((request) => (
-                <article className="team-run-event" key={request.request_id}>
+              items.map((item) => (
+                <article className={`team-run-event team-run-event-${item.kind}`} key={item.item_id}>
                   <div className="team-run-event-head">
-                    <span>User request</span>
-                    <time dateTime={new Date(request.create_time).toISOString()}>
-                      {new Date(request.create_time).toLocaleTimeString()}
+                    <span>{item.label}</span>
+                    <time dateTime={new Date(item.create_time).toISOString()}>
+                      {new Date(item.create_time).toLocaleTimeString()}
                     </time>
                   </div>
-                  <p>{request.text}</p>
-                  <span className="team-run-event-status">queued</span>
+                  <p>{item.text}</p>
+                  {item.status && <span className="team-run-event-status">{item.status}</span>}
                 </article>
               ))
             )}
@@ -141,7 +148,8 @@ export function TeamChatView({
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={handleKeyDown}
           rows={1}
-          placeholder="Message the team..."
+          placeholder={teamRunning ? 'Team is running...' : 'Message the team...'}
+          disabled={teamRunning || sending}
         />
         <div className="composer-toolbar">
           <div className="composer-toolbar-left" aria-hidden="true">

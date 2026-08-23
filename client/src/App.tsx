@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
-import { deleteSession, deleteTeam, getSessionMessages, getSessionModels, listAgents, listSessions, listTeams, respondPermission, selectSessionModel, sendMessage } from './api';
+import { deleteSession, deleteTeam, getSessionMessages, getSessionModels, listAgents, listSessions, listTeamRuns, listTeams, respondPermission, selectSessionModel, sendMessage, sendTeamRequest } from './api';
 import { ConversationView } from './components/ConversationView';
 import { CreateSessionForm } from './components/CreateSessionForm';
 import { CreateTeamForm } from './components/CreateTeamForm';
 import { EmptyState } from './components/EmptyState';
 import { PermissionModal } from './components/PermissionModal';
 import { Sidebar } from './components/Sidebar';
-import { TeamChatView, type TeamTimelineRequest } from './components/TeamChatView';
+import { TeamChatView, type TeamTimelineItem } from './components/TeamChatView';
 import {
   applyStreamEvent,
   applyUserMessage,
@@ -16,7 +16,7 @@ import {
   type ConversationMessage,
   type StreamableServerEvent,
 } from './conversation';
-import type { AgentId, ModelOption, PermissionRequest, ServerEvent, SessionRecord, TeamWithMembers } from './types';
+import type { AgentId, ModelOption, PermissionRequest, ServerEvent, SessionRecord, TeamRunWithItems, TeamWithMembers } from './types';
 import {
   closePane,
   emptyWorkspace,
@@ -40,6 +40,73 @@ function addSessionIfAbsent(prev: SessionRecord[], session: SessionRecord): Sess
   return prev.some((s) => s.session_id === session.session_id) ? prev : [session, ...prev];
 }
 
+function putTimelineItem(prev: TeamTimelineItem[], item: TeamTimelineItem): TeamTimelineItem[] {
+  const existing = prev.findIndex((entry) => entry.item_id === item.item_id);
+  if (existing === -1) return [...prev, item];
+  return prev.map((entry, index) => (index === existing ? { ...entry, ...item } : entry));
+}
+
+function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
+  const items: TeamTimelineItem[] = [];
+  for (const run of runs) {
+    for (const message of run.messages) {
+      if (message.kind === 'user_request') {
+        items.push({
+          item_id: `message:${message.message_id}`,
+          run_id: run.run.run_id,
+          kind: 'user_request',
+          label: 'User request',
+          text: message.content,
+          status: run.run.status,
+          create_time: message.create_time,
+        });
+      } else if (message.kind === 'final') {
+        items.push({
+          item_id: `message:${message.message_id}`,
+          run_id: run.run.run_id,
+          kind: 'final',
+          label: 'Final result',
+          text: message.content,
+          status: 'completed',
+          create_time: message.create_time,
+        });
+      } else if (message.kind === 'error') {
+        items.push({
+          item_id: `message:${message.message_id}`,
+          run_id: run.run.run_id,
+          kind: 'error',
+          label: 'Run error',
+          text: message.content,
+          status: 'failed',
+          create_time: message.create_time,
+        });
+      }
+    }
+
+    const hasTerminalMessage = run.messages.some((message) => message.kind === 'final' || message.kind === 'error');
+    for (const delivery of run.deliveries) {
+      if (delivery.status !== 'done' || !hasTerminalMessage) {
+        items.push({
+          item_id: `delivery:${delivery.delivery_id}:stream`,
+          run_id: run.run.run_id,
+          kind: 'leader_response',
+          label: 'Leader response',
+          text: delivery.status === 'done' ? 'Leader completed.' : '',
+          status: delivery.status,
+          create_time: delivery.started_at ?? delivery.created_at,
+        });
+      }
+    }
+  }
+  return items.sort((a, b) => a.create_time - b.create_time);
+}
+
+function memberStatusForDelivery(status: string): 'idle' | 'running' | 'waiting_permission' | 'error' {
+  if (status === 'running') return 'running';
+  if (status === 'failed') return 'error';
+  return 'idle';
+}
+
 
 export function App() {
   const [agents, setAgents] = useState<AgentId[]>([]);
@@ -58,7 +125,8 @@ export function App() {
   const [conversations, setConversations] = useState<Record<string, ConversationMessage[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [teamDrafts, setTeamDrafts] = useState<Record<string, string>>({});
-  const [teamRequests, setTeamRequests] = useState<Record<string, TeamTimelineRequest[]>>({});
+  const [teamTimeline, setTeamTimeline] = useState<Record<string, TeamTimelineItem[]>>({});
+  const [sendingTeamRequest, setSendingTeamRequest] = useState<Record<string, boolean>>({});
   // Starts on normal prompt submission and ends at the first visible stream
   // event. This is deliberately separate from history: old assistant messages
   // must not suppress the pending feedback for a new turn.
@@ -70,6 +138,7 @@ export function App() {
   // per mount (ref), so re-selecting an already-loaded session doesn't refetch,
   // while a failed fetch can be retried on the next select.
   const requestedHistory = useRef<Set<string>>(new Set());
+  const requestedTeamRuns = useRef<Set<string>>(new Set());
   const [historyStatus, setHistoryStatus] = useState<Record<string, { loading: boolean; error?: string }>>({});
   const [models, setModels] = useState<Record<string, { options: ModelOption[]; available: boolean }>>({});
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -173,6 +242,117 @@ export function App() {
           // idempotent for the tab that just answered optimistically.
           setPermissionQueue((prev) => prev.filter((p) => !sameRequest(p, event)));
           break;
+        case 'team_run_created':
+          setTeamTimeline((prev) => {
+            const withUser = putTimelineItem(prev[event.team_id] ?? [], {
+              item_id: `message:${event.user_message.message_id}`,
+              run_id: event.run.run_id,
+              kind: 'user_request',
+              label: 'User request',
+              text: event.user_message.content,
+              status: event.run.status,
+              create_time: event.user_message.create_time,
+            });
+            return {
+              ...prev,
+              [event.team_id]: putTimelineItem(withUser, {
+                item_id: `delivery:${event.delivery.delivery_id}:stream`,
+                run_id: event.run.run_id,
+                kind: 'leader_response',
+                label: 'Leader response',
+                text: '',
+                status: event.delivery.status,
+                create_time: event.delivery.created_at,
+              }),
+            };
+          });
+          setTeams((prev) =>
+            prev.map((team) => (team.team_id === event.team_id ? { ...team, status: 'running' } : team)),
+          );
+          break;
+        case 'team_delivery_status_change':
+          setTeamTimeline((prev) => ({
+            ...prev,
+            [event.team_id]: putTimelineItem(prev[event.team_id] ?? [], {
+              item_id: `delivery:${event.delivery_id}:stream`,
+              run_id: event.run_id,
+              kind: 'leader_response',
+              label: 'Leader response',
+              text: prev[event.team_id]?.find((item) => item.item_id === `delivery:${event.delivery_id}:stream`)?.text ?? '',
+              status: event.status,
+              create_time: Date.now(),
+            }),
+          }));
+          setTeams((prev) =>
+            prev.map((team) =>
+              team.team_id === event.team_id
+                ? {
+                    ...team,
+                    status: event.status === 'running' ? 'running' : event.status === 'failed' ? 'error' : team.status,
+                    members: team.members.map((member) =>
+                      member.member_id === event.member_id
+                        ? {
+                            ...member,
+                            status: memberStatusForDelivery(event.status),
+                            current_delivery_id: event.status === 'running' ? event.delivery_id : null,
+                          }
+                        : member,
+                    ),
+                  }
+                : team,
+            ),
+          );
+          break;
+        case 'team_text_delta':
+          setTeamTimeline((prev) => {
+            const itemId = `delivery:${event.delivery_id}:stream`;
+            const existing = prev[event.team_id]?.find((item) => item.item_id === itemId);
+            return {
+              ...prev,
+              [event.team_id]: putTimelineItem(prev[event.team_id] ?? [], {
+                item_id: itemId,
+                run_id: event.run_id,
+                kind: 'leader_response',
+                label: 'Leader response',
+                text: `${existing?.text ?? ''}${event.text}`,
+                status: existing?.status ?? 'running',
+                create_time: existing?.create_time ?? Date.now(),
+              }),
+            };
+          });
+          break;
+        case 'team_run_completed':
+          setTeamTimeline((prev) => ({
+            ...prev,
+            [event.team_id]: putTimelineItem(prev[event.team_id] ?? [], {
+              item_id: `message:${event.final_message.message_id}`,
+              run_id: event.run.run_id,
+              kind: 'final',
+              label: 'Final result',
+              text: event.final_message.content,
+              status: event.run.status,
+              create_time: event.final_message.create_time,
+            }),
+          }));
+          setSendingTeamRequest((prev) => ({ ...prev, [event.team_id]: false }));
+          void listTeams().then(setTeams);
+          break;
+        case 'team_run_failed':
+          setTeamTimeline((prev) => ({
+            ...prev,
+            [event.team_id]: putTimelineItem(prev[event.team_id] ?? [], {
+              item_id: `message:${event.error_message.message_id}`,
+              run_id: event.run.run_id,
+              kind: 'error',
+              label: 'Run error',
+              text: event.error_message.content,
+              status: event.run.status,
+              create_time: event.error_message.create_time,
+            }),
+          }));
+          setSendingTeamRequest((prev) => ({ ...prev, [event.team_id]: false }));
+          void listTeams().then(setTeams);
+          break;
       }
     };
     return () => source.close();
@@ -221,6 +401,19 @@ export function App() {
         .catch(() => setModels((prev) => ({ ...prev, [id]: { options: [], available: false } })));
     }
   }, [openSessionIds, workspace.panels, models]);
+
+  useEffect(() => {
+    if (!selectedTeamId || requestedTeamRuns.current.has(selectedTeamId)) return;
+    requestedTeamRuns.current.add(selectedTeamId);
+    listTeamRuns(selectedTeamId)
+      .then((runs) => {
+        setTeamTimeline((prev) => ({ ...prev, [selectedTeamId]: timelineFromRuns(runs) }));
+      })
+      .catch((err) => {
+        requestedTeamRuns.current.delete(selectedTeamId);
+        setTeamDeleteError(err instanceof Error ? err.message : String(err));
+      });
+  }, [selectedTeamId]);
 
   async function handleSend(session: SessionRecord, text: string, model: string | null) {
     const id = session.session_id;
@@ -337,7 +530,12 @@ export function App() {
         delete next[teamId];
         return next;
       });
-      setTeamRequests((prev) => {
+      setTeamTimeline((prev) => {
+        const next = { ...prev };
+        delete next[teamId];
+        return next;
+      });
+      setSendingTeamRequest((prev) => {
         const next = { ...prev };
         delete next[teamId];
         return next;
@@ -348,16 +546,23 @@ export function App() {
     }
   }
 
-  function handleTeamSubmit(teamId: string, text: string) {
-    const now = Date.now();
-    setTeamRequests((prev) => ({
-      ...prev,
-      [teamId]: [
-        ...(prev[teamId] ?? []),
-        { request_id: `${teamId}-${now}`, text, create_time: now },
-      ],
-    }));
+  async function handleTeamSubmit(teamId: string, text: string) {
     setTeamDrafts((prev) => ({ ...prev, [teamId]: '' }));
+    setTeamDeleteError(null);
+    setSendingTeamRequest((prev) => ({ ...prev, [teamId]: true }));
+    try {
+      const created = await sendTeamRequest(teamId, text);
+      setTeamTimeline((prev) => ({
+        ...prev,
+        [teamId]: timelineFromRuns([created]).reduce(
+          (items, item) => putTimelineItem(items, item),
+          prev[teamId] ?? [],
+        ),
+      }));
+    } catch (err) {
+      setSendingTeamRequest((prev) => ({ ...prev, [teamId]: false }));
+      setTeamDeleteError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   function handleClosePane(paneId: PaneId) {
@@ -479,9 +684,10 @@ export function App() {
             loading={!teamsLoaded}
             deleteError={teamDeleteError}
             draft={teamDrafts[selectedTeamId] ?? ''}
-            requests={teamRequests[selectedTeamId] ?? []}
+            items={teamTimeline[selectedTeamId] ?? []}
+            sending={sendingTeamRequest[selectedTeamId] ?? false}
             onDraftChange={(text) => setTeamDrafts((prev) => ({ ...prev, [selectedTeamId]: text }))}
-            onSubmit={(text) => handleTeamSubmit(selectedTeamId, text)}
+            onSubmit={(text) => void handleTeamSubmit(selectedTeamId, text)}
           />
         ) : visiblePanels.length > 0 ? (
           <div

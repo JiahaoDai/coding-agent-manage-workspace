@@ -6,9 +6,16 @@ import type { SessionStore } from './db';
 import { createFsTree, FsPathError, type FsTree } from './fs/tree';
 import { PermissionBroker } from './permission';
 import type { SseHub } from './sse';
-import type { PromptHandlers } from '../shared/adapter';
+import type { AgentAdapter, PromptHandlers } from '../shared/adapter';
 import type { ResumableSession, SessionRecord } from '../shared/session';
-import type { CreateTeamInput, TeamMemberInput, TeamMemberRecord, TeamRecord } from '../shared/team';
+import type {
+  CreateTeamInput,
+  TeamMemberInput,
+  TeamMemberRecord,
+  TeamMessageRecord,
+  TeamRecord,
+  TeamRunRecord,
+} from '../shared/team';
 
 export interface AppDeps {
   store: SessionStore;
@@ -61,9 +68,67 @@ export function createApp(deps: AppDeps): Hono {
     return team ? c.json(team) : c.json({ error: 'team not found' }, 404);
   });
 
+  app.get('/api/teams/:id/runs', (c) => {
+    const team_id = c.req.param('id');
+    const team = deps.store.getTeam(team_id);
+    if (!team) return c.json({ error: 'team not found' }, 404);
+    return c.json(deps.store.listTeamRuns(team_id));
+  });
+
   app.delete('/api/teams/:id', (c) => {
     const removed = deps.store.deleteTeam(c.req.param('id'));
     return removed ? c.json({ ok: true }) : c.json({ error: 'team not found' }, 404);
+  });
+
+  app.post('/api/teams/:id/runs', async (c) => {
+    const team_id = c.req.param('id');
+    const team = deps.store.getTeam(team_id);
+    if (!team) return c.json({ error: 'team not found' }, 404);
+    if (team.status === 'running') return c.json({ error: 'team is already running' }, 409);
+
+    const body = (await c.req.json().catch(() => null)) as { text?: unknown } | null;
+    const text = body?.text;
+    if (typeof text !== 'string' || text.trim() === '') return c.json({ error: 'text is required' }, 400);
+
+    const leader = team.members.find((member) => member.role === 'leader');
+    if (!leader) return c.json({ error: 'team requires a leader member' }, 409);
+
+    const session = deps.store.get(leader.session_id);
+    if (!session) return c.json({ error: 'leader session not found' }, 404);
+
+    const adapter = deps.adapters.get(session.coding_agent);
+    if (!adapter) return c.json({ error: `unknown agent: ${session.coding_agent}` }, 400);
+
+    const now = Date.now();
+    const created = deps.store.createLeaderRun({
+      run_id: randomUUID(),
+      team_id,
+      leader_member_id: leader.member_id,
+      user_message_id: randomUUID(),
+      delivery_id: randomUUID(),
+      content: text.trim(),
+      now,
+    });
+    const delivery = created.deliveries[0];
+    const user_message = created.messages[0];
+
+    deps.sse.broadcast({ type: 'team_run_created', team_id, run: created.run, user_message, delivery });
+
+    void runLeaderOnlyDelivery({
+      deps,
+      permissions,
+      adapter,
+      team_name: team.name,
+      team_id,
+      cwd: team.cwd,
+      leader,
+      session,
+      run: created.run,
+      delivery_id: delivery.delivery_id,
+      text: text.trim(),
+    });
+
+    return c.json(created, 202);
   });
 
   app.post('/api/teams', async (c) => {
@@ -445,6 +510,153 @@ export function createApp(deps: AppDeps): Hono {
   return app;
 }
 
+async function runLeaderOnlyDelivery({
+  deps,
+  permissions,
+  adapter,
+  team_name,
+  team_id,
+  cwd,
+  leader,
+  session,
+  run,
+  delivery_id,
+  text,
+}: {
+  deps: AppDeps;
+  permissions: PermissionBroker;
+  adapter: AgentAdapter;
+  team_name: string;
+  team_id: string;
+  cwd: string;
+  leader: TeamMemberRecord;
+  session: SessionRecord;
+  run: TeamRunRecord;
+  delivery_id: string;
+  text: string;
+}): Promise<void> {
+  const output: string[] = [];
+
+  deps.store.updateTeamDeliveryStatus(delivery_id, 'running');
+  deps.store.updateTeamMemberStatus(leader.member_id, 'running', delivery_id);
+  deps.store.updateStatus(session.session_id, 'running');
+  deps.sse.broadcast({
+    type: 'team_delivery_status_change',
+    team_id,
+    run_id: run.run_id,
+    delivery_id,
+    member_id: leader.member_id,
+    status: 'running',
+  });
+  deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
+
+  const handlers: PromptHandlers = {
+    onTextDelta: (delta) => {
+      output.push(delta);
+      deps.sse.broadcast({
+        type: 'team_text_delta',
+        team_id,
+        run_id: run.run_id,
+        delivery_id,
+        member_id: leader.member_id,
+        text: delta,
+      });
+    },
+    onToolCallStart: () => {},
+    onToolCallEnd: () => {},
+    onThinkingDelta: () => {},
+    onStatusNote: (note) => {
+      deps.sse.broadcast({
+        type: 'team_text_delta',
+        team_id,
+        run_id: run.run_id,
+        delivery_id,
+        member_id: leader.member_id,
+        text: note,
+      });
+    },
+    onStatusChange: (status) => {
+      const current = deps.store.get(session.session_id);
+      if (current && current.status === status) return;
+      deps.store.updateStatus(session.session_id, status);
+      deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status });
+    },
+    onPermissionRequest: (request_id, tool_name, input) => {
+      deps.store.updateTeamMemberStatus(leader.member_id, 'waiting_permission', delivery_id);
+      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input });
+      return permissions.request(session.session_id, request_id);
+    },
+  };
+
+  try {
+    await adapter.prompt(session.real_session_id, cwd, leaderOnlyPrompt({ team_name, leader, text }), handlers);
+
+    const final = parseLeaderFinal(output.join(''));
+    if (!final) throw new Error('leader response did not contain a valid final JSON result');
+
+    const finalMessage: TeamMessageRecord = {
+      message_id: randomUUID(),
+      team_id,
+      run_id: run.run_id,
+      from_member_id: leader.member_id,
+      from_kind: 'member',
+      kind: 'final',
+      content: final.result,
+      create_time: Date.now(),
+    };
+    deps.store.insertTeamMessageRecord(finalMessage);
+    deps.store.updateTeamDeliveryStatus(delivery_id, 'done');
+    deps.store.updateTeamMemberStatus(leader.member_id, 'idle', null);
+    deps.store.updateTeamStatus(team_id, 'idle');
+    const completedRun = deps.store.finishTeamRun(run.run_id, 'completed');
+
+    const current = deps.store.get(session.session_id);
+    if (current && current.status === 'running') {
+      deps.store.updateStatus(session.session_id, 'completed');
+      deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'completed' });
+    }
+    deps.sse.broadcast({
+      type: 'team_delivery_status_change',
+      team_id,
+      run_id: run.run_id,
+      delivery_id,
+      member_id: leader.member_id,
+      status: 'done',
+    });
+    deps.sse.broadcast({ type: 'team_run_completed', team_id, run: completedRun, final_message: finalMessage });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const errorMessage: TeamMessageRecord = {
+      message_id: randomUUID(),
+      team_id,
+      run_id: run.run_id,
+      from_member_id: leader.member_id,
+      from_kind: 'system',
+      kind: 'error',
+      content: message,
+      create_time: Date.now(),
+    };
+
+    deps.store.insertTeamMessageRecord(errorMessage);
+    deps.store.updateTeamDeliveryStatus(delivery_id, 'failed', message);
+    deps.store.updateTeamMemberStatus(leader.member_id, 'error', null);
+    deps.store.updateTeamStatus(team_id, 'error');
+    deps.store.recordError(session.session_id, message);
+    const failedRun = deps.store.finishTeamRun(run.run_id, 'failed');
+
+    deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'error' });
+    deps.sse.broadcast({
+      type: 'team_delivery_status_change',
+      team_id,
+      run_id: run.run_id,
+      delivery_id,
+      member_id: leader.member_id,
+      status: 'failed',
+    });
+    deps.sse.broadcast({ type: 'team_run_failed', team_id, run: failedRun, error_message: errorMessage });
+  }
+}
+
 function validateCreateTeam(
   body: Partial<CreateTeamInput> | null,
 ): { value: CreateTeamInput } | { error: string } {
@@ -500,6 +712,51 @@ function memberInitializationPrompt(member: TeamMemberInput): string {
     '- PROPOSAL: ...',
     '- FAILED: ...',
   ].join('\n');
+}
+
+function leaderOnlyPrompt({
+  team_name,
+  leader,
+  text,
+}: {
+  team_name: string;
+  leader: TeamMemberRecord;
+  text: string;
+}): string {
+  return [
+    `Team: ${team_name}`,
+    `Delivery target: ${leader.role}`,
+    '',
+    'Leader responsibility:',
+    leader.responsibility_prompt,
+    '',
+    'User request:',
+    text,
+    '',
+    'This is the first leader-only orchestration step. Handle the request yourself and finish the team run.',
+    'Return only a JSON object in this shape:',
+    '{"type":"final","summary":"short summary","result":"final answer for the user"}',
+  ].join('\n');
+}
+
+function parseLeaderFinal(raw: string): { summary: string; result: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const candidate = fenced ? fenced[1].trim() : trimmed.slice(trimmed.indexOf('{'), trimmed.lastIndexOf('}') + 1);
+  if (!candidate) return null;
+
+  try {
+    const parsed = JSON.parse(candidate) as { type?: unknown; summary?: unknown; result?: unknown };
+    if (parsed.type !== 'final' || typeof parsed.result !== 'string' || parsed.result.trim() === '') return null;
+    return {
+      summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+      result: parsed.result.trim(),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function initializationHandlers(role: string): PromptHandlers {

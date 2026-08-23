@@ -9,7 +9,17 @@ export type {
 } from '../../shared/session';
 export type { ServerEvent } from '../../shared/events';
 export type { CapabilityResult, ModelOption } from '../../shared/adapter';
-export type { CreateTeamInput, TeamMemberInput, TeamMemberRecord, TeamRecord, TeamWithMembers } from '../../shared/team';
+export type {
+  CreateTeamInput,
+  TeamMemberInput,
+  TeamMemberRecord,
+  TeamMessageDeliveryRecord,
+  TeamMessageRecord,
+  TeamRecord,
+  TeamRunRecord,
+  TeamRunWithItems,
+  TeamWithMembers,
+} from '../../shared/team';
 
 /** A permission request awaiting the user's decision, derived from the SSE event. */
 export interface PermissionRequest {
