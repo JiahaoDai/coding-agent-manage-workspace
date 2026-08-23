@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] A user can create a team with a name, one `cwd`, and at least one leader member plus optional worker/reviewer members.
-- [ ] Each member gets a newly created dashboard session; existing ordinary sessions are not reused.
-- [ ] Member initialization prompts are sent once per member session and are not repeated during later deliveries.
-- [ ] The team and members persist across app reloads.
-- [ ] Tests cover team creation, member/session uniqueness, and role template/custom role creation.
+- [x] A user can create a team with a name, one `cwd`, and at least one leader member plus optional worker/reviewer members.
+- [x] Each member gets a newly created dashboard session; existing ordinary sessions are not reused.
+- [x] Member initialization prompts are sent once per member session and are not repeated during later deliveries.
+- [x] The team and members persist across app reloads.
+- [x] Tests cover team creation, member/session uniqueness, and role template/custom role creation.

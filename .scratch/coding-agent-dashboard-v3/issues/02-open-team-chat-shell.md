@@ -4,10 +4,10 @@
 
 **Blocked by:** 01: Create agent teams with fresh member sessions.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] A user can select a team from the app and open its team chat view.
-- [ ] The view shows team name, working directory, members, roles, agents, models, and statuses.
-- [ ] The team composer accepts a user request but does not need to execute real orchestration yet.
-- [ ] Empty, loading, and missing-team states are handled cleanly.
-- [ ] Tests cover opening a team, rendering member metadata, and preserving the current ordinary session workflow.
+- [x] A user can select a team from the app and open its team chat view.
+- [x] The view shows team name, working directory, members, roles, agents, models, and statuses.
+- [x] The team composer accepts a user request but does not need to execute real orchestration yet.
+- [x] Empty, loading, and missing-team states are handled cleanly.
+- [x] Tests cover opening a team, rendering member metadata, and preserving the current ordinary session workflow.

@@ -6,7 +6,7 @@ import { CreateTeamForm } from './components/CreateTeamForm';
 import { EmptyState } from './components/EmptyState';
 import { PermissionModal } from './components/PermissionModal';
 import { Sidebar } from './components/Sidebar';
-import { TeamOverview } from './components/TeamOverview';
+import { TeamChatView, type TeamTimelineRequest } from './components/TeamChatView';
 import {
   applyStreamEvent,
   applyUserMessage,
@@ -46,6 +46,7 @@ export function App() {
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [teams, setTeams] = useState<TeamWithMembers[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  const [teamsLoaded, setTeamsLoaded] = useState(false);
   const [connected, setConnected] = useState(false);
   const [creating, setCreating] = useState<'session' | 'team' | null>(null);
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
@@ -56,6 +57,8 @@ export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>(emptyWorkspace);
   const [conversations, setConversations] = useState<Record<string, ConversationMessage[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [teamDrafts, setTeamDrafts] = useState<Record<string, string>>({});
+  const [teamRequests, setTeamRequests] = useState<Record<string, TeamTimelineRequest[]>>({});
   // Starts on normal prompt submission and ends at the first visible stream
   // event. This is deliberately separate from history: old assistant messages
   // must not suppress the pending feedback for a new turn.
@@ -82,7 +85,10 @@ export function App() {
 
   useEffect(() => {
     void listAgents().then(setAgents);
-    void listTeams().then(setTeams);
+    void listTeams()
+      .then(setTeams)
+      .catch(() => setTeams([]))
+      .finally(() => setTeamsLoaded(true));
     void listSessions().then((list) => {
       setSessions(list);
       setWorkspace(restoreWorkspace(typeof window === 'undefined' ? null : window.localStorage.getItem(WORKSPACE_STORAGE_KEY), new Set(list.map((session) => session.session_id))));
@@ -112,6 +118,7 @@ export function App() {
       // EventSource auto-reconnects after a drop; re-read SQLite (the single
       // source of truth) so statuses missed during the gap are reconciled.
       void listSessions().then(setSessions);
+      void listTeams().then(setTeams);
     };
     source.onerror = () => setConnected(false);
     source.onmessage = (message) => {
@@ -325,10 +332,32 @@ export function App() {
       await deleteTeam(teamId);
       setTeams((prev) => prev.filter((team) => team.team_id !== teamId));
       if (selectedTeamId === teamId) setSelectedTeamId(null);
+      setTeamDrafts((prev) => {
+        const next = { ...prev };
+        delete next[teamId];
+        return next;
+      });
+      setTeamRequests((prev) => {
+        const next = { ...prev };
+        delete next[teamId];
+        return next;
+      });
       void listSessions().then(setSessions);
     } catch (err) {
       setTeamDeleteError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  function handleTeamSubmit(teamId: string, text: string) {
+    const now = Date.now();
+    setTeamRequests((prev) => ({
+      ...prev,
+      [teamId]: [
+        ...(prev[teamId] ?? []),
+        { request_id: `${teamId}-${now}`, text, create_time: now },
+      ],
+    }));
+    setTeamDrafts((prev) => ({ ...prev, [teamId]: '' }));
   }
 
   function handleClosePane(paneId: PaneId) {
@@ -444,10 +473,15 @@ export function App() {
             }}
             onCancel={() => setCreating(null)}
           />
-        ) : selectedTeam ? (
-          <TeamOverview
+        ) : selectedTeamId ? (
+          <TeamChatView
             team={selectedTeam}
+            loading={!teamsLoaded}
             deleteError={teamDeleteError}
+            draft={teamDrafts[selectedTeamId] ?? ''}
+            requests={teamRequests[selectedTeamId] ?? []}
+            onDraftChange={(text) => setTeamDrafts((prev) => ({ ...prev, [selectedTeamId]: text }))}
+            onSubmit={(text) => handleTeamSubmit(selectedTeamId, text)}
           />
         ) : visiblePanels.length > 0 ? (
           <div
