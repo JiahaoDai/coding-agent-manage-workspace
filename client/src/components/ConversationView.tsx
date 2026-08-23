@@ -74,14 +74,22 @@ export function ConversationView({
   session,
   messages,
   onSend,
+  draft: controlledDraft,
+  onDraftChange,
   models = [],
   loading = false,
   error = null,
   awaitingFirstResponse = false,
+  active = false,
+  permissionHighlighted = false,
+  onActivate,
+  onClose,
 }: {
   session: SessionRecord;
   messages: ConversationMessage[];
   onSend: (text: string, model: string | null) => void;
+  draft?: string;
+  onDraftChange?: (text: string) => void;
   models?: ModelOption[];
   /** True while the session's history is being fetched from its native store. */
   loading?: boolean;
@@ -89,11 +97,18 @@ export function ConversationView({
   error?: string | null;
   /** True from prompt submission until the first displayable response event. */
   awaitingFirstResponse?: boolean;
+  /** Whether this panel is the active workspace target. */
+  active?: boolean;
+  /** Whether this panel owns the currently visible permission request. */
+  permissionHighlighted?: boolean;
+  onActivate?: () => void;
+  onClose?: () => void;
 }) {
-  const [draft, setDraft] = useState('');
+  const [internalDraft, setInternalDraft] = useState('');
   const [model, setModel] = useState<string | null>(session.model);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const draft = controlledDraft ?? internalDraft;
 
   const running = session.status === 'running';
   const canSend = !running && draft.trim() !== '';
@@ -116,6 +131,14 @@ export function ConversationView({
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, [draft]);
 
+  function setDraft(text: string) {
+    if (onDraftChange) {
+      onDraftChange(text);
+    } else {
+      setInternalDraft(text);
+    }
+  }
+
   function submit() {
     const text = draft.trim();
     if (!canSend || text === '') return;
@@ -131,7 +154,10 @@ export function ConversationView({
   }
 
   return (
-    <div className="conversation">
+    <div
+      className={`conversation${active ? ' is-active' : ''}${permissionHighlighted ? ' has-permission-request' : ''}`}
+      onPointerDown={onActivate}
+    >
       <header className="conversation-header">
         <div className="conversation-heading">
           <h2 className="conversation-title">{session.name}</h2>
@@ -143,6 +169,21 @@ export function ConversationView({
           <span className="status-dot" aria-hidden="true" />
           {STATUS_LABEL[session.status]}
         </span>
+        {onClose && (
+          <button type="button" className="icon-btn conversation-close" onClick={onClose} aria-label={`Close ${session.name}`}>
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        )}
       </header>
 
       <div className="conversation-messages" ref={scrollRef} aria-live="polite">

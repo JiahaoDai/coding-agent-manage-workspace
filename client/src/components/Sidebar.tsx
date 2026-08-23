@@ -9,6 +9,7 @@ export function Sidebar({
   connected,
   selectedId,
   onSelect,
+  onOpenInSplit,
   onDelete,
   onNewSession,
 }: {
@@ -16,6 +17,7 @@ export function Sidebar({
   connected: boolean;
   selectedId: string | null;
   onSelect: (sessionId: string) => void;
+  onOpenInSplit: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
   onNewSession: () => void;
 }) {
@@ -58,6 +60,7 @@ export function Sidebar({
         sessions={filtered}
         selectedId={selectedId}
         onSelect={onSelect}
+        onOpenInSplit={onOpenInSplit}
         onDelete={onDelete}
         emptyLabel={emptyLabel}
       />

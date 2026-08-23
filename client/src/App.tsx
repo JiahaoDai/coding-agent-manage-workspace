@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
 import { deleteSession, getSessionMessages, getSessionModels, listAgents, listSessions, respondPermission, selectSessionModel, sendMessage } from './api';
 import { ConversationView } from './components/ConversationView';
 import { CreateSessionForm } from './components/CreateSessionForm';
@@ -15,6 +15,21 @@ import {
   type StreamableServerEvent,
 } from './conversation';
 import type { AgentId, ModelOption, PermissionRequest, ServerEvent, SessionRecord } from './types';
+import {
+  closePane,
+  emptyWorkspace,
+  openInActivePane,
+  openInSplitPane,
+  removeSessionFromWorkspace,
+  restoreWorkspace,
+  serializeWorkspace,
+  setActivePane,
+  setSplitRatio,
+  type PaneId,
+  type WorkspaceState,
+} from './workspace';
+
+const WORKSPACE_STORAGE_KEY = 'coding-agent-dashboard.workspace.v1';
 
 /** Prepend only if the session is not already present — both the POST response
  * and the SSE `session_created` event may deliver the same session. */
@@ -26,10 +41,12 @@ function addSessionIfAbsent(prev: SessionRecord[], session: SessionRecord): Sess
 export function App() {
   const [agents, setAgents] = useState<AgentId[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [connected, setConnected] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceState>(emptyWorkspace);
   const [conversations, setConversations] = useState<Record<string, ConversationMessage[]>>({});
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
   // Starts on normal prompt submission and ends at the first visible stream
   // event. This is deliberately separate from history: old assistant messages
   // must not suppress the pending feedback for a new turn.
@@ -43,6 +60,7 @@ export function App() {
   const requestedHistory = useRef<Set<string>>(new Set());
   const [historyStatus, setHistoryStatus] = useState<Record<string, { loading: boolean; error?: string }>>({});
   const [models, setModels] = useState<Record<string, { options: ModelOption[]; available: boolean }>>({});
+  const workspaceRef = useRef<HTMLDivElement>(null);
 
   /**
    * A request id is only unique within a session (agents reuse per-turn
@@ -55,8 +73,22 @@ export function App() {
 
   useEffect(() => {
     void listAgents().then(setAgents);
-    void listSessions().then(setSessions);
+    void listSessions().then((list) => {
+      setSessions(list);
+      setWorkspace(restoreWorkspace(typeof window === 'undefined' ? null : window.localStorage.getItem(WORKSPACE_STORAGE_KEY), new Set(list.map((session) => session.session_id))));
+      setSessionsLoaded(true);
+    });
   }, []);
+
+  useEffect(() => {
+    if (!sessionsLoaded || typeof window === 'undefined') return;
+    window.localStorage.setItem(WORKSPACE_STORAGE_KEY, serializeWorkspace(workspace));
+  }, [sessionsLoaded, workspace]);
+
+  useEffect(() => {
+    if (!sessionsLoaded) return;
+    setWorkspace((prev) => restoreWorkspace(serializeWorkspace(prev), new Set(sessions.map((session) => session.session_id))));
+  }, [sessions, sessionsLoaded]);
 
   useEffect(() => {
     const source = new EventSource('/api/events');
@@ -123,44 +155,49 @@ export function App() {
     return () => source.close();
   }, []);
 
-  // Load a session's history from its native store when it is selected.
+  const openSessionIds = workspace.panels.map((panel) => panel.sessionId).join('|');
+
+  // Load each visible session's history from its native store.
   // Message bodies live in the agent's store, never in SQLite (design §4), so
   // after a refresh the view starts empty and this repopulates it. The guard
   // keeps it once-per-session; live streamed turns still append on top.
   useEffect(() => {
-    const id = selectedId;
-    if (!id || requestedHistory.current.has(id)) return;
-    requestedHistory.current.add(id);
-    setHistoryStatus((prev) => ({ ...prev, [id]: { loading: true } }));
-    getSessionMessages(id)
-      .then((messages) => {
-        setConversations((prev) =>
-          // Never clobber a live conversation (a message just sent, or a turn
-          // streaming in); only fill the empty view.
-          prev[id] && prev[id].length > 0
-            ? prev
-            : messages.length
-              ? { ...prev, [id]: messagesToConversation(messages) }
-              : prev,
-        );
-        setHistoryStatus((prev) => ({ ...prev, [id]: { loading: false } }));
-      })
-      .catch((err) => {
-        // Allow a retry on the next select.
-        requestedHistory.current.delete(id);
-        setHistoryStatus((prev) => ({
-          ...prev,
-          [id]: { loading: false, error: err instanceof Error ? err.message : String(err) },
-        }));
-      });
-  }, [selectedId]);
+    for (const id of workspace.panels.map((panel) => panel.sessionId)) {
+      if (requestedHistory.current.has(id)) continue;
+      requestedHistory.current.add(id);
+      setHistoryStatus((prev) => ({ ...prev, [id]: { loading: true } }));
+      getSessionMessages(id)
+        .then((messages) => {
+          setConversations((prev) =>
+            // Never clobber a live conversation (a message just sent, or a turn
+            // streaming in); only fill the empty view.
+            prev[id] && prev[id].length > 0
+              ? prev
+              : messages.length
+                ? { ...prev, [id]: messagesToConversation(messages) }
+                : prev,
+          );
+          setHistoryStatus((prev) => ({ ...prev, [id]: { loading: false } }));
+        })
+        .catch((err) => {
+          // Allow a retry on the next open.
+          requestedHistory.current.delete(id);
+          setHistoryStatus((prev) => ({
+            ...prev,
+            [id]: { loading: false, error: err instanceof Error ? err.message : String(err) },
+          }));
+        });
+    }
+  }, [openSessionIds, workspace.panels]);
 
   useEffect(() => {
-    if (!selectedId || models[selectedId]) return;
-    void getSessionModels(selectedId)
-      .then((result) => setModels((prev) => ({ ...prev, [selectedId]: result.supported ? { options: result.value, available: true } : { options: [], available: false } })))
-      .catch(() => setModels((prev) => ({ ...prev, [selectedId]: { options: [], available: false } })));
-  }, [selectedId, models]);
+    for (const id of workspace.panels.map((panel) => panel.sessionId)) {
+      if (models[id]) continue;
+      void getSessionModels(id)
+        .then((result) => setModels((prev) => ({ ...prev, [id]: result.supported ? { options: result.value, available: true } : { options: [], available: false } })))
+        .catch(() => setModels((prev) => ({ ...prev, [id]: { options: [], available: false } })));
+    }
+  }, [openSessionIds, workspace.panels, models]);
 
   async function handleSend(session: SessionRecord, text: string, model: string | null) {
     const id = session.session_id;
@@ -192,7 +229,13 @@ export function App() {
   /** Drop a session everywhere: the list, its conversation, and the selection. */
   function removeSession(sessionId: string) {
     setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
+    setWorkspace((prev) => removeSessionFromWorkspace(prev, sessionId));
     setConversations((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    setDrafts((prev) => {
       const next = { ...prev };
       delete next[sessionId];
       return next;
@@ -202,7 +245,6 @@ export function App() {
       delete next[sessionId];
       return next;
     });
-    setSelectedId((prev) => (prev === sessionId ? null : prev));
   }
 
   async function handleDelete(sessionId: string) {
@@ -242,8 +284,52 @@ export function App() {
     }
   }
 
-  const selected = sessions.find((s) => s.session_id === selectedId) ?? null;
-  const selectedHistory = selectedId ? historyStatus[selectedId] : undefined;
+  function handleOpen(sessionId: string) {
+    setCreating(false);
+    setWorkspace((prev) => openInActivePane(prev, sessionId));
+  }
+
+  function handleOpenInSplit(sessionId: string) {
+    setCreating(false);
+    setWorkspace((prev) => openInSplitPane(prev, sessionId));
+  }
+
+  function handleClosePane(paneId: PaneId) {
+    setWorkspace((prev) => closePane(prev, paneId));
+  }
+
+  function handleDividerPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    const container = workspaceRef.current;
+    if (!container) return;
+    const containerEl = container;
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    event.currentTarget.setPointerCapture(pointerId);
+
+    function update(clientX: number) {
+      const rect = containerEl.getBoundingClientRect();
+      const ratio = ((clientX - rect.left) / rect.width) * 100;
+      setWorkspace((prev) => setSplitRatio(prev, ratio));
+    }
+
+    function handlePointerMove(moveEvent: PointerEvent) {
+      update(moveEvent.clientX);
+    }
+
+    function handlePointerUp() {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    }
+
+    update(event.clientX);
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+  }
+
+  const selectedId = workspace.panels.find((panel) => panel.paneId === workspace.activePane)?.sessionId ?? null;
+  const visiblePanels = workspace.panels
+    .map((panel) => ({ panel, session: sessions.find((s) => s.session_id === panel.sessionId) ?? null }))
+    .filter((item): item is { panel: { paneId: PaneId; sessionId: string }; session: SessionRecord } => item.session !== null);
   const pendingPermission = permissionQueue[0] ?? null;
   const pendingSession = pendingPermission
     ? sessions.find((s) => s.session_id === pendingPermission.session_id)
@@ -255,11 +341,11 @@ export function App() {
         sessions={sessions}
         connected={connected}
         selectedId={selectedId}
-        onSelect={setSelectedId}
+        onSelect={handleOpen}
+        onOpenInSplit={handleOpenInSplit}
         onDelete={handleDelete}
         onNewSession={() => {
           setCreating(true);
-          setSelectedId(null);
         }}
       />
       <main className="main">
@@ -269,20 +355,55 @@ export function App() {
             onCreated={(session) => {
               setSessions((prev) => addSessionIfAbsent(prev, session));
               setCreating(false);
-              setSelectedId(session.session_id);
+              setWorkspace((prev) => openInActivePane(prev, session.session_id));
             }}
             onCancel={() => setCreating(false)}
           />
-        ) : selected ? (
-          <ConversationView
-            session={selected}
-            messages={conversations[selected.session_id] ?? []}
-            onSend={(text, model) => void handleSend(selected, text, model)}
-            models={models[selected.session_id]?.options}
-            loading={selectedHistory?.loading}
-            error={selectedHistory?.error}
-            awaitingFirstResponse={awaitingFirstResponse[selected.session_id] ?? false}
-          />
+        ) : visiblePanels.length > 0 ? (
+          <div
+            className={`workspace workspace-${visiblePanels.length}`}
+            ref={workspaceRef}
+            style={{ '--split-ratio': `${workspace.splitRatio}%` } as CSSProperties}
+          >
+            {visiblePanels.map(({ panel, session }, index) => {
+              const panelHistory = historyStatus[session.session_id];
+              const ownsPendingPermission = pendingPermission?.session_id === session.session_id;
+              return (
+                <div
+                  key={panel.paneId}
+                  className="workspace-panel"
+                  style={visiblePanels.length === 2
+                    ? { flexBasis: panel.paneId === 'left' ? 'var(--split-ratio)' : `calc(100% - var(--split-ratio))` }
+                    : undefined}
+                >
+                  <ConversationView
+                    session={session}
+                    messages={conversations[session.session_id] ?? []}
+                    draft={drafts[session.session_id] ?? ''}
+                    onDraftChange={(text) => setDrafts((prev) => ({ ...prev, [session.session_id]: text }))}
+                    onSend={(text, model) => void handleSend(session, text, model)}
+                    models={models[session.session_id]?.options}
+                    loading={panelHistory?.loading}
+                    error={panelHistory?.error}
+                    awaitingFirstResponse={awaitingFirstResponse[session.session_id] ?? false}
+                    active={workspace.activePane === panel.paneId}
+                    permissionHighlighted={ownsPendingPermission}
+                    onActivate={() => setWorkspace((prev) => setActivePane(prev, panel.paneId))}
+                    onClose={() => handleClosePane(panel.paneId)}
+                  />
+                  {visiblePanels.length === 2 && index === 0 && (
+                    <div
+                      className="workspace-divider"
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label="Resize panels"
+                      onPointerDown={handleDividerPointerDown}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
         ) : (
           <EmptyState onNewSession={() => setCreating(true)} />
         )}

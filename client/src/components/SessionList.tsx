@@ -1,3 +1,4 @@
+import { useEffect, useState, type MouseEvent } from 'react';
 import { STATUS_LABEL } from '../labels';
 import { groupByAgent } from '../sessionFilters';
 import type { SessionRecord } from '../types';
@@ -22,16 +23,67 @@ export function SessionList({
   sessions,
   selectedId,
   onSelect,
+  onOpenInSplit,
   onDelete,
   emptyLabel = 'No sessions yet.',
 }: {
   sessions: SessionRecord[];
   selectedId: string | null;
   onSelect: (sessionId: string) => void;
+  onOpenInSplit: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
   /** Shown when there are no sessions to display (empty list, or none match filters). */
   emptyLabel?: string;
 }) {
+  const [menu, setMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (!menu) return;
+
+    function close() {
+      setMenu(null);
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') close();
+    }
+
+    window.addEventListener('click', close);
+    window.addEventListener('contextmenu', close);
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('contextmenu', close);
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [menu]);
+
+  function openContextMenu(event: MouseEvent, sessionId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    const menuWidth = 168;
+    const menuHeight = 88;
+    const margin = 8;
+    const maxX = window.innerWidth - menuWidth - margin;
+    const maxY = window.innerHeight - menuHeight - margin;
+    setMenu({
+      sessionId,
+      x: Math.max(margin, Math.min(event.clientX, maxX)),
+      y: Math.max(margin, Math.min(event.clientY, maxY)),
+    });
+  }
+
+  function choose(action: 'open' | 'split') {
+    if (!menu) return;
+    const sessionId = menu.sessionId;
+    setMenu(null);
+    if (action === 'open') {
+      onSelect(sessionId);
+    } else {
+      onOpenInSplit(sessionId);
+    }
+  }
+
   if (sessions.length === 0) {
     return <p className="session-empty">{emptyLabel}</p>;
   }
@@ -45,6 +97,7 @@ export function SessionList({
             <div
               key={session.session_id}
               className={`session-item${session.session_id === selectedId ? ' is-selected' : ''}`}
+              onContextMenu={(event) => openContextMenu(event, session.session_id)}
             >
               <button
                 type="button"
@@ -80,6 +133,23 @@ export function SessionList({
           ))}
         </div>
       ))}
+      {menu && (
+        <div
+          className="session-context-menu"
+          style={{ left: menu.x, top: menu.y }}
+          role="menu"
+          aria-label="Session actions"
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button type="button" role="menuitem" onClick={() => choose('open')}>
+            Open
+          </button>
+          <button type="button" role="menuitem" onClick={() => choose('split')}>
+            Open in Split
+          </button>
+        </div>
+      )}
     </nav>
   );
 }
