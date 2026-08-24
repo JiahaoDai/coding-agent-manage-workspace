@@ -329,7 +329,7 @@ export class SessionStore {
         team_id: input.team_id,
         root_user_message_id: input.user_message_id,
         status: 'running',
-        max_rounds: 1,
+        max_rounds: 8,
         current_round: 1,
         create_time: input.now,
         finish_time: null,
@@ -604,6 +604,57 @@ export class SessionStore {
     });
 
     return complete();
+  }
+
+  cancelOpenTeamDeliveries(run_id: string, except_delivery_id: string | null = null): TeamMessageDeliveryRecord[] {
+    const cancel = this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT delivery_id, message_id, team_id, run_id, to_member_id, status, enqueue_seq,
+                  created_at, started_at, finished_at, error
+           FROM team_message_delivery
+           WHERE run_id = ?
+             AND status IN ('blocked', 'pending')
+             AND (? IS NULL OR delivery_id != ?)
+           ORDER BY created_at ASC, enqueue_seq ASC, delivery_id ASC`,
+        )
+        .all(run_id, except_delivery_id, except_delivery_id) as TeamDeliveryRow[];
+      if (rows.length === 0) return [];
+
+      const now = Date.now();
+      const update = this.db.prepare(
+        `UPDATE team_message_delivery
+         SET status = 'cancelled', finished_at = ?
+         WHERE delivery_id = ?`,
+      );
+      for (const row of rows) update.run(now, row.delivery_id);
+      return rows.map((row) => toTeamDelivery({ ...row, status: 'cancelled', finished_at: now }));
+    });
+
+    return cancel();
+  }
+
+  advanceTeamRunRound(run_id: string): { run: TeamRunRecord } | { error: string; run: TeamRunRecord } | undefined {
+    const advance = this.db.transaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT run_id, team_id, root_user_message_id, status, max_rounds, current_round, create_time, finish_time
+           FROM team_run WHERE run_id = ?`,
+        )
+        .get(run_id) as TeamRunRow | undefined;
+      if (!row) return undefined;
+      const run = toTeamRun(row);
+      if (run.status !== 'running') return { run };
+      if (run.current_round >= run.max_rounds) {
+        return { error: `team run exceeded max_rounds (${run.max_rounds})`, run };
+      }
+
+      const nextRound = run.current_round + 1;
+      this.db.prepare(`UPDATE team_run SET current_round = ? WHERE run_id = ?`).run(nextRound, run_id);
+      return { run: { ...run, current_round: nextRound } };
+    });
+
+    return advance();
   }
 
   finishTeamRun(run_id: string, status: TeamRunStatus): TeamRunRecord {

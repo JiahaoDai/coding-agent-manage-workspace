@@ -485,6 +485,13 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
           handlers.onTextDelta('{"type":"final","summary":"done",');
           handlers.onTextDelta('"result":"Leader handled the request."}');
         }
+        if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'All planned work is done.',
+            result: 'Leader reviewed member results and finished.',
+          }));
+        }
         handlers.onStatusChange('completed');
       };
 
@@ -649,6 +656,12 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
               },
             ],
           }));
+        } else if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'All planned work is done.',
+            result: 'Leader reviewed member results and finished.',
+          }));
         }
         handlers.onStatusChange('completed');
       };
@@ -712,11 +725,12 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         dependencies: Array<{ delivery_id: string; depends_on_delivery_id: string; dependency_type: string }>;
       }>;
       expect(runs).toHaveLength(1);
-      expect(runs[0].run.status).toBe('running');
+      expect(runs[0].run.status).toBe('completed');
       const messageKinds = runs[0].messages.map((message) => message.kind);
       expect(messageKinds.slice(0, 2)).toEqual(['user_request', 'status']);
       expect(messageKinds.filter((kind) => kind === 'assignment')).toHaveLength(3);
       expect(messageKinds.filter((kind) => kind === 'result')).toHaveLength(3);
+      expect(messageKinds.filter((kind) => kind === 'final')).toHaveLength(1);
 
       const backendDeliveries = runs[0].deliveries.filter((delivery) => delivery.to_member_id === backend.member_id);
       expect(backendDeliveries.map((delivery) => delivery.enqueue_seq)).toEqual([1, 2]);
@@ -729,7 +743,7 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
       expect(runs[0].dependencies).toEqual(planEvent!.dependencies);
 
       const listedTeams = await (await fetch(`${baseUrl}/api/teams`)).json() as Array<{ team_id: string; status: string }>;
-      expect(listedTeams[0]).toMatchObject({ team_id: team.team_id, status: 'running' });
+      expect(listedTeams[0]).toMatchObject({ team_id: team.team_id, status: 'idle' });
 
       await reader.cancel();
     } finally {
@@ -774,6 +788,12 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         } else if (ctx.input.includes('New delivery:')) {
           handlers.onTextDelta(`worked:${ctx.input.match(/Task:\n([\s\S]*?)\n\nDependency summaries:/)?.[1] ?? 'unknown'}`);
           await sleep(60);
+        } else if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'All worker deliveries are complete.',
+            result: 'Leader finished after reading worker outputs.',
+          }));
         }
         handlers.onStatusChange('completed');
       };
@@ -790,7 +810,7 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
 
       const events = await collectEvents(
         reader,
-        (evs) => evs.filter((event) => event.type === 'team_delivery_status_change' && event.status === 'done').length === 4,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
       );
       const planEvent = events.find(
         (event): event is Extract<ServerEvent, { type: 'team_plan_created' }> =>
@@ -832,15 +852,15 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         run: { status: string };
         deliveries: Array<{ status: string; to_member_id: string; enqueue_seq: number }>;
       }>;
-      expect(runs[0].run.status).toBe('running');
+      expect(runs[0].run.status).toBe('completed');
       expect(runs[0].deliveries.map((delivery) => delivery.status)).toEqual([
         'done',
         'done',
         'done',
         'done',
-        'pending',
-        'pending',
-        'pending',
+        'done',
+        'cancelled',
+        'cancelled',
       ]);
 
       const backend = team.members.find((member) => member.role === 'backend-coder')!;
@@ -972,6 +992,12 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
             }));
           } else if (ctx.input.includes('New delivery:')) {
             handlers.onTextDelta(output);
+          } else if (ctx.input.includes('New inbound team message:')) {
+            handlers.onTextDelta(JSON.stringify({
+              type: 'final',
+              summary: 'Leader handled outbound.',
+              result: 'Leader received the member outbound message.',
+            }));
           }
           handlers.onStatusChange('completed');
         };
@@ -990,7 +1016,9 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
 
         const events = await collectEvents(
           reader,
-          (evs) => evs.some((event) => event.type === 'team_message_created'),
+          (evs) =>
+            evs.some((event) => event.type === 'team_message_created') &&
+            evs.some((event) => event.type === 'team_run_completed'),
         );
         const routed = events.find(
           (event): event is Extract<ServerEvent, { type: 'team_message_created' }> =>
@@ -1014,12 +1042,12 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
           messages: Array<{ kind: string; content: string; from_member_id: string | null }>;
           deliveries: Array<{ message_id: string; to_member_id: string; status: string; error: string | null }>;
         }>;
-        expect(runs[0].run.status).toBe('running');
+        expect(runs[0].run.status).toBe('completed');
         expect(runs[0].messages.some((message) => message.kind === expectedKind && message.content === expectedContent)).toBe(true);
         const originalDelivery = runs[0].deliveries.find((delivery) => delivery.to_member_id === worker.member_id)!;
         expect(originalDelivery.status).toBe(expectedKind === 'error' ? 'failed' : 'done');
         expect(originalDelivery.error).toBe(expectedKind === 'error' ? expectedContent : null);
-        expect(runs[0].deliveries.some((delivery) => delivery.to_member_id === leader.member_id && delivery.status === 'pending')).toBe(true);
+        expect(runs[0].deliveries.some((delivery) => delivery.to_member_id === leader.member_id && delivery.status === 'done')).toBe(true);
 
         await reader.cancel();
       } finally {
@@ -1049,6 +1077,12 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
           }));
         } else if (ctx.input.includes('New delivery:')) {
           handlers.onTextDelta('MESSAGE_TO reviewer: Please review the API route.');
+        } else if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Handled reviewer proposal.',
+            result: 'Leader saw the attempted direct reviewer message.',
+          }));
         }
         handlers.onStatusChange('completed');
       };
@@ -1068,7 +1102,9 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
 
       const events = await collectEvents(
         reader,
-        (evs) => evs.some((event) => event.type === 'team_message_created'),
+        (evs) =>
+          evs.some((event) => event.type === 'team_message_created') &&
+          evs.some((event) => event.type === 'team_run_completed'),
       );
       const routed = events.find(
         (event): event is Extract<ServerEvent, { type: 'team_message_created' }> =>
@@ -1086,7 +1122,162 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         deliveries: Array<{ to_member_id: string; status: string }>;
       }>;
       expect(runs[0].deliveries.filter((delivery) => delivery.to_member_id === reviewer.member_id)).toEqual([]);
-      expect(runs[0].deliveries.filter((delivery) => delivery.to_member_id === leader.member_id && delivery.status === 'pending')).toHaveLength(1);
+      expect(runs[0].deliveries.filter((delivery) => delivery.to_member_id === leader.member_id && delivery.status === 'done')).toHaveLength(2);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('runs leader re-plan, reviewer review, and leader final in one sequential loop', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Implement first, then decide whether to review.',
+            assignments: [
+              {
+                id: 'backend-work',
+                to: 'backend-coder',
+                task: 'Implement backend change.',
+                context: 'Report concise result.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New inbound team message:') && ctx.input.includes('Review passed')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Backend work was implemented and reviewed.',
+            result: 'Backend change is complete and review passed.',
+          }));
+        } else if (ctx.input.includes('New inbound team message:') && ctx.input.includes('Backend done with tests.')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Review the backend result.',
+            assignments: [
+              {
+                id: 'review-backend-work',
+                to: 'reviewer',
+                task: 'Review backend result.',
+                context: 'Focus on regressions.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('Task:') && ctx.input.includes('Implement backend change.')) {
+          handlers.onTextDelta('RESULT: Backend done with tests.');
+        } else if (ctx.input.includes('Task:') && ctx.input.includes('Review backend result.')) {
+          handlers.onTextDelta('REVIEW: Review passed; no regressions found.');
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Implement and review backend work.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+      expect(events.filter((event) => event.type === 'team_plan_created')).toHaveLength(2);
+      const completed = events.find(
+        (event): event is Extract<ServerEvent, { type: 'team_run_completed' }> =>
+          event.type === 'team_run_completed',
+      );
+      expect(completed!.final_message.content).toBe('Backend change is complete and review passed.');
+      expect(completed!.run.current_round).toBe(3);
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { status: string; current_round: number };
+        messages: Array<{ kind: string; content: string }>;
+        deliveries: Array<{ status: string }>;
+      }>;
+      expect(runs[0].run).toMatchObject({ status: 'completed', current_round: 3 });
+      const messageKinds = runs[0].messages.map((message) => message.kind);
+      expect(messageKinds.slice(0, 2)).toEqual(['user_request', 'status']);
+      expect(messageKinds.filter((kind) => kind === 'assignment')).toHaveLength(2);
+      expect(messageKinds.filter((kind) => kind === 'status')).toHaveLength(2);
+      expect(messageKinds).toContain('result');
+      expect(messageKinds).toContain('review');
+      expect(messageKinds.at(-1)).toBe('final');
+      expect(runs[0].deliveries.map((delivery) => delivery.status)).toEqual(['done', 'done', 'done', 'done', 'done']);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('fails a run when leader re-plan loops exceed max_rounds', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:') || ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Keep looping until max rounds stops us.',
+            assignments: [
+              {
+                id: `loop-${fake.promptCalls.length}`,
+                to: 'backend-coder',
+                task: 'Loop once.',
+                context: 'Return result.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('Task:') && ctx.input.includes('Loop once.')) {
+          handlers.onTextDelta('RESULT: Loop result.');
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Loop forever.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_failed'),
+      );
+      const failed = events.find(
+        (event): event is Extract<ServerEvent, { type: 'team_run_failed' }> =>
+          event.type === 'team_run_failed',
+      );
+      expect(failed!.error_message.content).toBe('team run exceeded max_rounds (8)');
+      expect(failed!.run.status).toBe('failed');
+      expect(failed!.run.current_round).toBe(8);
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { status: string; current_round: number; max_rounds: number };
+        messages: Array<{ kind: string; content: string }>;
+        deliveries: Array<{ status: string }>;
+      }>;
+      expect(runs[0].run).toMatchObject({ status: 'failed', current_round: 8, max_rounds: 8 });
+      expect(runs[0].messages.at(-1)).toMatchObject({
+        kind: 'error',
+        content: 'team run exceeded max_rounds (8)',
+      });
+      expect(runs[0].deliveries.some((delivery) => delivery.status === 'failed')).toBe(true);
 
       await reader.cancel();
     } finally {

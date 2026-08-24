@@ -673,7 +673,7 @@ async function runLeaderOnlyDelivery({
         deliveries: planned.deliveries,
         dependencies: planned.dependencies,
       });
-      void runSequentialWorkerDeliveries({
+      void runTeamOrchestrator({
         deps,
         permissions,
         team_id,
@@ -745,7 +745,7 @@ async function runLeaderOnlyDelivery({
   }
 }
 
-async function runSequentialWorkerDeliveries({
+async function runTeamOrchestrator({
   deps,
   permissions,
   team_id,
@@ -769,7 +769,8 @@ async function runSequentialWorkerDeliveries({
       });
     }
 
-    const claimed = deps.store.claimNextRunnableTeamDelivery(run_id, { includeLeader: false });
+    let claimed = deps.store.claimNextRunnableTeamDelivery(run_id, { includeLeader: false });
+    if (!claimed) claimed = deps.store.claimNextRunnableTeamDelivery(run_id);
     if (!claimed) break;
 
     deps.sse.broadcast({
@@ -781,16 +782,273 @@ async function runSequentialWorkerDeliveries({
       status: 'running',
     });
 
-    await runClaimedTeamDelivery({
-      deps,
-      permissions,
-      delivery: claimed.delivery,
-      message: claimed.message,
-      member: claimed.member,
-    });
+    if (claimed.member.role === 'leader') {
+      await runClaimedLeaderFollowUpDelivery({
+        deps,
+        permissions,
+        delivery: claimed.delivery,
+        message: claimed.message,
+        leader: claimed.member,
+      });
+    } else {
+      await runClaimedTeamDelivery({
+        deps,
+        permissions,
+        delivery: claimed.delivery,
+        message: claimed.message,
+        member: claimed.member,
+      });
+    }
   }
 
   deps.store.completeRunIfNoOpenDeliveries(run_id);
+}
+
+async function runClaimedLeaderFollowUpDelivery({
+  deps,
+  permissions,
+  delivery,
+  message,
+  leader,
+}: {
+  deps: AppDeps;
+  permissions: PermissionBroker;
+  delivery: TeamMessageDeliveryRecord;
+  message: TeamMessageRecord;
+  leader: TeamMemberRecord;
+}): Promise<void> {
+  const session = deps.store.get(leader.session_id);
+  const adapter = session ? deps.adapters.get(session.coding_agent) : undefined;
+  const fail = (error: string) => {
+    const errorMessage: TeamMessageRecord = {
+      message_id: randomUUID(),
+      team_id: delivery.team_id,
+      run_id: delivery.run_id,
+      from_member_id: leader.member_id,
+      from_kind: 'system',
+      kind: 'error',
+      content: error,
+      create_time: Date.now(),
+    };
+
+    deps.store.insertTeamMessageRecord(errorMessage);
+    deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'failed', error);
+    deps.store.updateTeamMemberStatus(leader.member_id, 'error', null);
+    deps.store.updateTeamStatus(delivery.team_id, 'error');
+    if (session) deps.store.recordError(session.session_id, error);
+    const cancelled = deps.store.cancelOpenTeamDeliveries(delivery.run_id, delivery.delivery_id);
+    const failedRun = deps.store.finishTeamRun(delivery.run_id, 'failed');
+
+    if (session) deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'error' });
+    deps.sse.broadcast({
+      type: 'team_delivery_status_change',
+      team_id: delivery.team_id,
+      run_id: delivery.run_id,
+      delivery_id: delivery.delivery_id,
+      member_id: leader.member_id,
+      status: 'failed',
+    });
+    for (const cancelledDelivery of cancelled) {
+      deps.sse.broadcast({
+        type: 'team_delivery_status_change',
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        delivery_id: cancelledDelivery.delivery_id,
+        member_id: cancelledDelivery.to_member_id,
+        status: 'cancelled',
+      });
+    }
+    deps.sse.broadcast({ type: 'team_run_failed', team_id: delivery.team_id, run: failedRun, error_message: errorMessage });
+  };
+
+  if (!session) {
+    fail('leader session not found');
+    return;
+  }
+  if (!adapter) {
+    fail(`unknown agent: ${session.coding_agent}`);
+    return;
+  }
+
+  const round = deps.store.advanceTeamRunRound(delivery.run_id);
+  if (!round) {
+    fail('team run not found');
+    return;
+  }
+  if ('error' in round) {
+    fail(round.error);
+    return;
+  }
+
+  const output: string[] = [];
+  const broadcastLeaderText = (text: string) =>
+    deps.sse.broadcast({
+      type: 'team_text_delta',
+      team_id: delivery.team_id,
+      run_id: delivery.run_id,
+      delivery_id: delivery.delivery_id,
+      member_id: leader.member_id,
+      text,
+    });
+
+  deps.store.updateStatus(session.session_id, 'running');
+  deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
+
+  const handlers: PromptHandlers = {
+    onTextDelta: (delta) => {
+      output.push(delta);
+      broadcastLeaderText(delta);
+    },
+    onToolCallStart: () => {},
+    onToolCallEnd: () => {},
+    onThinkingDelta: () => {},
+    onStatusNote: (note) => {
+      broadcastLeaderText(note);
+    },
+    onStatusChange: (status) => {
+      const current = deps.store.get(session.session_id);
+      if (current && current.status === status) return;
+      deps.store.updateStatus(session.session_id, status);
+      deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status });
+    },
+    onPermissionRequest: (request_id, tool_name, input) => {
+      deps.store.updateTeamMemberStatus(leader.member_id, 'waiting_permission', delivery.delivery_id);
+      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input });
+      return permissions.request(session.session_id, request_id);
+    },
+  };
+
+  try {
+    const team = deps.store.getTeam(delivery.team_id);
+    const runItems = deps.store.getTeamRun(delivery.run_id);
+    await adapter.prompt(
+      session.real_session_id,
+      session.cwd,
+      leaderFollowUpPrompt({
+        team_name: team?.name ?? delivery.team_id,
+        leader,
+        message,
+        members: team?.members ?? [leader],
+        runItems,
+      }),
+      handlers,
+    );
+
+    const rawOutput = output.join('');
+    let outcome = parseLeaderOutcome(rawOutput, team?.members ?? [leader]);
+    if ('error' in outcome && shouldRetryLeaderJson(rawOutput, outcome.error)) {
+      const retryOutput: string[] = [];
+      const retryHandlers: PromptHandlers = {
+        ...handlers,
+        onTextDelta: (delta) => {
+          retryOutput.push(delta);
+          broadcastLeaderText(delta);
+        },
+        onStatusNote: (note) => {
+          retryOutput.push(note);
+          broadcastLeaderText(note);
+        },
+      };
+      await adapter.prompt(
+        session.real_session_id,
+        session.cwd,
+        leaderJsonRetryPrompt(rawOutput, outcome.error),
+        retryHandlers,
+      );
+      const retryOutcome = parseLeaderOutcome(retryOutput.join(''), team?.members ?? [leader]);
+      if (!('error' in retryOutcome)) outcome = retryOutcome;
+    }
+    if ('error' in outcome) throw new Error(outcome.error);
+
+    if (outcome.type === 'plan') {
+      const planned = deps.store.createPlanDeliveries({
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        leader_member_id: leader.member_id,
+        plan_message_id: randomUUID(),
+        summary: outcome.summary,
+        assignments: outcome.assignments.map((assignment) => ({
+          message_id: randomUUID(),
+          delivery_id: assignment.delivery_id,
+          to_member_id: assignment.to_member_id,
+          content: assignmentContent(assignment),
+          blocked: assignment.dependencies.length > 0,
+          dependencies: assignment.dependencies,
+        })),
+        now: Date.now(),
+      });
+
+      deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'done');
+      deps.store.updateTeamMemberStatus(leader.member_id, 'idle', null);
+      const current = deps.store.get(session.session_id);
+      if (current && current.status === 'running') {
+        deps.store.updateStatus(session.session_id, 'completed');
+        deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'completed' });
+      }
+      deps.sse.broadcast({
+        type: 'team_delivery_status_change',
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        delivery_id: delivery.delivery_id,
+        member_id: leader.member_id,
+        status: 'done',
+      });
+      deps.sse.broadcast({
+        type: 'team_plan_created',
+        team_id: delivery.team_id,
+        run: deps.store.getTeamRun(delivery.run_id)!.run,
+        plan_message: planned.plan_message,
+        assignment_messages: planned.assignment_messages,
+        deliveries: planned.deliveries,
+        dependencies: planned.dependencies,
+      });
+      return;
+    }
+
+    const finalMessage: TeamMessageRecord = {
+      message_id: randomUUID(),
+      team_id: delivery.team_id,
+      run_id: delivery.run_id,
+      from_member_id: leader.member_id,
+      from_kind: 'member',
+      kind: 'final',
+      content: outcome.result,
+      create_time: Date.now(),
+    };
+    deps.store.insertTeamMessageRecord(finalMessage);
+    deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'done');
+    deps.store.updateTeamMemberStatus(leader.member_id, 'idle', null);
+    deps.store.updateTeamStatus(delivery.team_id, 'idle');
+    const cancelled = deps.store.cancelOpenTeamDeliveries(delivery.run_id, delivery.delivery_id);
+    const completedRun = deps.store.finishTeamRun(delivery.run_id, 'completed');
+
+    const current = deps.store.get(session.session_id);
+    if (current && current.status === 'running') {
+      deps.store.updateStatus(session.session_id, 'completed');
+      deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'completed' });
+    }
+    deps.sse.broadcast({
+      type: 'team_delivery_status_change',
+      team_id: delivery.team_id,
+      run_id: delivery.run_id,
+      delivery_id: delivery.delivery_id,
+      member_id: leader.member_id,
+      status: 'done',
+    });
+    for (const cancelledDelivery of cancelled) {
+      deps.sse.broadcast({
+        type: 'team_delivery_status_change',
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        delivery_id: cancelledDelivery.delivery_id,
+        member_id: cancelledDelivery.to_member_id,
+        status: 'cancelled',
+      });
+    }
+    deps.sse.broadcast({ type: 'team_run_completed', team_id: delivery.team_id, run: completedRun, final_message: finalMessage });
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
 }
 
 async function runClaimedTeamDelivery({
@@ -1047,6 +1305,67 @@ function leaderOnlyPrompt({
     'Escape every double quote inside JSON string values as \\".',
     'Escape every newline inside JSON string values as \\n; do not put literal line breaks inside a string value.',
     'Prefer single quotes or parentheses inside result text instead of raw double quotes.',
+    '',
+    'Final shape:',
+    '{"type":"final","summary":"short summary","result":"final answer for the user"}',
+    '',
+    'Plan shape:',
+    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
+  ].join('\n');
+}
+
+function leaderFollowUpPrompt({
+  team_name,
+  leader,
+  message,
+  members,
+  runItems,
+}: {
+  team_name: string;
+  leader: TeamMemberRecord;
+  message: TeamMessageRecord;
+  members: TeamWithMembers['members'];
+  runItems: TeamRunWithItems | undefined;
+}): string {
+  const availableRoles = members.map((member) => member.role);
+  const memberLines = members.map((member) => {
+    const model = member.model ? `model=${member.model}` : 'model=agent-default';
+    return `- ${member.role}: agent=${member.coding_agent}, ${model}, responsibility=${member.responsibility_prompt}`;
+  });
+  const memberById = new Map(members.map((member) => [member.member_id, member]));
+  const sender = message.from_member_id ? memberById.get(message.from_member_id)?.role ?? message.from_member_id : message.from_kind;
+  const busLines = (runItems?.messages ?? [])
+    .filter((item) => item.message_id !== message.message_id)
+    .map((item) => {
+      const from = item.from_member_id ? memberById.get(item.from_member_id)?.role ?? item.from_member_id : item.from_kind;
+      return `- ${item.kind} from ${from}: ${compactForPrompt(item.content)}`;
+    });
+
+  return [
+    `Team: ${team_name}`,
+    `Delivery target: ${leader.role}`,
+    '',
+    'Leader responsibility:',
+    leader.responsibility_prompt,
+    '',
+    'New inbound team message:',
+    `Kind: ${message.kind}`,
+    `From: ${sender}`,
+    message.content,
+    '',
+    'Run message bus summary:',
+    busLines.length > 0 ? busLines.join('\n') : '- none',
+    '',
+    'Decide whether to finish now or create another plan for existing team members.',
+    'Available member roles for assignments:',
+    ...memberLines,
+    '',
+    `When returning a plan, each assignments[].to MUST be exactly one of: ${availableRoles.join(', ')}.`,
+    'Do not invent roles or assign work to roles that are not listed above.',
+    'Return only one strict JSON object.',
+    'Do not write prose, markdown, or explanations outside the JSON object.',
+    'Escape every double quote inside JSON string values as \\".',
+    'Escape every newline inside JSON string values as \\n; do not put literal line breaks inside a string value.',
     '',
     'Final shape:',
     '{"type":"final","summary":"short summary","result":"final answer for the user"}',

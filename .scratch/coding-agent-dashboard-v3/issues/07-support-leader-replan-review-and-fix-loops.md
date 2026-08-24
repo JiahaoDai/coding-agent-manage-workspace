@@ -4,10 +4,10 @@
 
 **Blocked by:** 06: Route member outbound messages back to leader.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Leader follow-up deliveries can return a new `plan` that creates additional assignments in the same run.
-- [ ] Review and fix loops can proceed sequentially without losing prior delivery context.
-- [ ] `max_rounds` prevents infinite leader/member loops and surfaces a clear stop state.
-- [ ] The team timeline shows each re-plan step and the deliveries it created.
-- [ ] Tests cover a leader-plan -> worker-result -> leader-replan -> reviewer-review -> leader-final flow.
+- [x] Leader follow-up deliveries can return a new `plan` that creates additional assignments in the same run.
+- [x] Review and fix loops can proceed sequentially without losing prior delivery context.
+- [x] `max_rounds` prevents infinite leader/member loops and surfaces a clear stop state.
+- [x] The team timeline shows each re-plan step and the deliveries it created.
+- [x] Tests cover a leader-plan -> worker-result -> leader-replan -> reviewer-review -> leader-final flow.
