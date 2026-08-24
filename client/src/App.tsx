@@ -297,7 +297,7 @@ export function App() {
               item_id: `delivery:${event.delivery_id}:stream`,
               run_id: event.run_id,
               kind: 'leader_response',
-              label: 'Leader response',
+              label: prev[event.team_id]?.find((item) => item.item_id === `delivery:${event.delivery_id}:stream`)?.label ?? 'Delivery',
               text: prev[event.team_id]?.find((item) => item.item_id === `delivery:${event.delivery_id}:stream`)?.text ?? '',
               status: event.status,
               create_time: Date.now(),
@@ -322,6 +322,7 @@ export function App() {
                 : team,
             ),
           );
+          if (event.status !== 'running' && event.status !== 'pending') void listTeams().then(setTeams);
           break;
         case 'team_text_delta':
           setTeamTimeline((prev) => {

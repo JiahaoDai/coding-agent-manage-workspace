@@ -665,9 +665,21 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
 
       const events = await collectEvents(
         reader,
-        (evs) => evs.some((event) => event.type === 'team_plan_created'),
+        (evs) => {
+          const plan = evs.find(
+            (event): event is Extract<ServerEvent, { type: 'team_plan_created' }> =>
+              event.type === 'team_plan_created',
+          );
+          if (!plan) return false;
+          return evs.filter(
+            (event) =>
+              event.type === 'team_delivery_status_change' &&
+              event.status === 'done' &&
+              plan.deliveries.some((delivery) => delivery.delivery_id === event.delivery_id),
+          ).length === plan.deliveries.length;
+        },
       );
-      const leaderPrompt = fake.promptCalls.at(-1)!.input;
+      const leaderPrompt = fake.promptCalls.find((call) => call.input.includes('User request:'))!.input;
       expect(leaderPrompt).toContain('Available member roles for assignments:');
       expect(leaderPrompt).toContain('- leader: agent=fake');
       expect(leaderPrompt).toContain('- backend-coder: agent=fake');
@@ -700,7 +712,7 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         dependencies: Array<{ delivery_id: string; depends_on_delivery_id: string; dependency_type: string }>;
       }>;
       expect(runs).toHaveLength(1);
-      expect(runs[0].run.status).toBe('running');
+      expect(runs[0].run.status).toBe('completed');
       expect(runs[0].messages.map((message) => message.kind)).toEqual([
         'user_request',
         'status',
@@ -711,16 +723,214 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
 
       const backendDeliveries = runs[0].deliveries.filter((delivery) => delivery.to_member_id === backend.member_id);
       expect(backendDeliveries.map((delivery) => delivery.enqueue_seq)).toEqual([1, 2]);
-      expect(backendDeliveries.map((delivery) => delivery.status)).toEqual(['pending', 'pending']);
+      expect(backendDeliveries.map((delivery) => delivery.status)).toEqual(['done', 'done']);
 
       const reviewerDeliveries = runs[0].deliveries.filter((delivery) => delivery.to_member_id === reviewer.member_id);
       expect(reviewerDeliveries).toEqual([
-        expect.objectContaining({ enqueue_seq: 1, status: 'blocked' }),
+        expect.objectContaining({ enqueue_seq: 1, status: 'done' }),
       ]);
       expect(runs[0].dependencies).toEqual(planEvent!.dependencies);
 
       const listedTeams = await (await fetch(`${baseUrl}/api/teams`)).json() as Array<{ team_id: string; status: string }>;
-      expect(listedTeams[0]).toMatchObject({ team_id: team.team_id, status: 'running' });
+      expect(listedTeams[0]).toMatchObject({ team_id: team.team_id, status: 'idle' });
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('executes queued worker deliveries globally sequentially with incremental prompts', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = async (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Implement API work, tests, and review.',
+            assignments: [
+              {
+                id: 'api',
+                to: 'backend-coder',
+                task: 'Implement the API endpoint.',
+                context: 'Use existing Hono route patterns.',
+                depends_on: [],
+              },
+              {
+                id: 'api-tests',
+                to: 'backend-coder',
+                task: 'Add route tests.',
+                context: 'Cover success and validation errors.',
+                depends_on: [],
+              },
+              {
+                id: 'review-api',
+                to: 'reviewer',
+                task: 'Review the API implementation.',
+                context: 'Focus on queue ordering and validation.',
+                depends_on: ['api'],
+                dependency_type: 'success',
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          handlers.onTextDelta(`worked:${ctx.input.match(/Task:\n([\s\S]*?)\n\nDependency summaries:/)?.[1] ?? 'unknown'}`);
+          await sleep(60);
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Build API, tests, and review.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.filter((event) => event.type === 'team_delivery_status_change' && event.status === 'done').length === 4,
+      );
+      const planEvent = events.find(
+        (event): event is Extract<ServerEvent, { type: 'team_plan_created' }> =>
+          event.type === 'team_plan_created',
+      );
+      expect(planEvent).toBeTruthy();
+      const workerDeliveryIds = new Set(planEvent!.deliveries.map((delivery) => delivery.delivery_id));
+
+      let activeWorkerDeliveries = 0;
+      let maxActiveWorkerDeliveries = 0;
+      for (const event of events) {
+        if (event.type !== 'team_delivery_status_change' || !workerDeliveryIds.has(event.delivery_id)) continue;
+        if (event.status === 'running') {
+          activeWorkerDeliveries += 1;
+          maxActiveWorkerDeliveries = Math.max(maxActiveWorkerDeliveries, activeWorkerDeliveries);
+        }
+        if (event.status === 'done' || event.status === 'failed' || event.status === 'cancelled') {
+          activeWorkerDeliveries -= 1;
+        }
+      }
+      expect(maxActiveWorkerDeliveries).toBe(1);
+      expect(fake.maxConcurrentPrompts).toBe(1);
+
+      const workerPrompts = fake.promptCalls.map((call) => call.input).filter((input) => input.includes('New delivery:'));
+      expect(workerPrompts).toHaveLength(3);
+      expect(workerPrompts[0]).toContain('Task: Implement the API endpoint.');
+      expect(workerPrompts[1]).toContain('Task: Add route tests.');
+      expect(workerPrompts[2]).toContain('Task: Review the API implementation.');
+      expect(workerPrompts[2]).toContain('Dependency summaries:');
+      expect(workerPrompts[2]).toContain('requires success, status=done');
+      for (const prompt of workerPrompts) {
+        expect(prompt).not.toContain('You are backend-coder in an agent team.');
+        expect(prompt).not.toContain('You are reviewer in an agent team.');
+        expect(prompt).not.toContain('Collaboration rules:');
+        expect(prompt).not.toContain('Leader responsibility:');
+      }
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { status: string };
+        deliveries: Array<{ status: string; to_member_id: string; enqueue_seq: number }>;
+      }>;
+      expect(runs[0].run.status).toBe('completed');
+      expect(runs[0].deliveries.map((delivery) => delivery.status)).toEqual(['done', 'done', 'done', 'done']);
+
+      const backend = team.members.find((member) => member.role === 'backend-coder')!;
+      expect(runs[0].deliveries.filter((delivery) => delivery.to_member_id === backend.member_id).map((delivery) => delivery.enqueue_seq)).toEqual([1, 2]);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('repairs a leader final JSON object with prose, unescaped quotes, and literal newlines', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(`I can finish now.
+
+{"type":"final","summary":"OpenAI的"刹车"","result":"双方强调"不是收购"。
+第二行"}`);
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Summarize AI news.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+      const completed = events.find(
+        (event): event is Extract<ServerEvent, { type: 'team_run_completed' }> =>
+          event.type === 'team_run_completed',
+      );
+      expect(completed!.final_message.content).toBe('双方强调"不是收购"。\n第二行');
+      expect(completed!.run.status).toBe('completed');
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        messages: Array<{ kind: string; content: string }>;
+      }>;
+      expect(runs[0].messages.map((message) => message.kind)).toEqual(['user_request', 'final']);
+      expect(runs[0].messages[1].content).toBe('双方强调"不是收购"。\n第二行');
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('retries leader parsing by asking for strict JSON when repair cannot infer a valid object', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta('type: final answer; summary: done');
+        } else if (ctx.input.includes('Rewrite the same intent as exactly one strict JSON object.')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'done',
+            result: 'Leader rewrote the answer as strict JSON.',
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Finish without delegation.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+      const completed = events.find(
+        (event): event is Extract<ServerEvent, { type: 'team_run_completed' }> =>
+          event.type === 'team_run_completed',
+      );
+      expect(completed!.final_message.content).toBe('Leader rewrote the answer as strict JSON.');
+      expect(fake.promptCalls.some((call) => call.input.includes('Previous response to rewrite:'))).toBe(true);
 
       await reader.cancel();
     } finally {

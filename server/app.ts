@@ -13,9 +13,11 @@ import type {
   TeamDeliveryDependencyType,
   TeamMemberInput,
   TeamMemberRecord,
+  TeamMessageDeliveryRecord,
   TeamMessageRecord,
   TeamRecord,
   TeamRunRecord,
+  TeamRunWithItems,
   TeamWithMembers,
 } from '../shared/team';
 
@@ -541,6 +543,15 @@ async function runLeaderOnlyDelivery({
   team_members: TeamWithMembers['members'];
 }): Promise<void> {
   const output: string[] = [];
+  const broadcastLeaderText = (text: string) =>
+    deps.sse.broadcast({
+      type: 'team_text_delta',
+      team_id,
+      run_id: run.run_id,
+      delivery_id,
+      member_id: leader.member_id,
+      text,
+    });
 
   deps.store.updateTeamDeliveryStatus(delivery_id, 'running');
   deps.store.updateTeamMemberStatus(leader.member_id, 'running', delivery_id);
@@ -558,27 +569,13 @@ async function runLeaderOnlyDelivery({
   const handlers: PromptHandlers = {
     onTextDelta: (delta) => {
       output.push(delta);
-      deps.sse.broadcast({
-        type: 'team_text_delta',
-        team_id,
-        run_id: run.run_id,
-        delivery_id,
-        member_id: leader.member_id,
-        text: delta,
-      });
+      broadcastLeaderText(delta);
     },
     onToolCallStart: () => {},
     onToolCallEnd: () => {},
     onThinkingDelta: () => {},
     onStatusNote: (note) => {
-      deps.sse.broadcast({
-        type: 'team_text_delta',
-        team_id,
-        run_id: run.run_id,
-        delivery_id,
-        member_id: leader.member_id,
-        text: note,
-      });
+      broadcastLeaderText(note);
     },
     onStatusChange: (status) => {
       const current = deps.store.get(session.session_id);
@@ -601,7 +598,36 @@ async function runLeaderOnlyDelivery({
       handlers,
     );
 
-    const outcome = parseLeaderOutcome(output.join(''), team_members);
+    const rawOutput = output.join('');
+    let outcome = parseLeaderOutcome(rawOutput, team_members);
+    if ('error' in outcome && shouldRetryLeaderJson(rawOutput, outcome.error)) {
+      const retryOutput: string[] = [];
+      const current = deps.store.get(session.session_id);
+      if (current && current.status !== 'running') {
+        deps.store.updateStatus(session.session_id, 'running');
+        deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
+      }
+
+      const retryHandlers: PromptHandlers = {
+        ...handlers,
+        onTextDelta: (delta) => {
+          retryOutput.push(delta);
+          broadcastLeaderText(delta);
+        },
+        onStatusNote: (note) => {
+          retryOutput.push(note);
+          broadcastLeaderText(note);
+        },
+      };
+      await adapter.prompt(
+        session.real_session_id,
+        cwd,
+        leaderJsonRetryPrompt(rawOutput, outcome.error),
+        retryHandlers,
+      );
+      const retryOutcome = parseLeaderOutcome(retryOutput.join(''), team_members);
+      if (!('error' in retryOutcome)) outcome = retryOutcome;
+    }
     if ('error' in outcome) throw new Error(outcome.error);
 
     if (outcome.type === 'plan') {
@@ -645,6 +671,12 @@ async function runLeaderOnlyDelivery({
         assignment_messages: planned.assignment_messages,
         deliveries: planned.deliveries,
         dependencies: planned.dependencies,
+      });
+      void runSequentialWorkerDeliveries({
+        deps,
+        permissions,
+        team_id,
+        run_id: run.run_id,
       });
       return;
     }
@@ -709,6 +741,163 @@ async function runLeaderOnlyDelivery({
       status: 'failed',
     });
     deps.sse.broadcast({ type: 'team_run_failed', team_id, run: failedRun, error_message: errorMessage });
+  }
+}
+
+async function runSequentialWorkerDeliveries({
+  deps,
+  permissions,
+  team_id,
+  run_id,
+}: {
+  deps: AppDeps;
+  permissions: PermissionBroker;
+  team_id: string;
+  run_id: string;
+}): Promise<void> {
+  for (;;) {
+    const released = deps.store.releaseSatisfiedBlockedDeliveries(run_id);
+    for (const delivery of released) {
+      deps.sse.broadcast({
+        type: 'team_delivery_status_change',
+        team_id,
+        run_id,
+        delivery_id: delivery.delivery_id,
+        member_id: delivery.to_member_id,
+        status: 'pending',
+      });
+    }
+
+    const claimed = deps.store.claimNextRunnableTeamDelivery(run_id);
+    if (!claimed) break;
+
+    deps.sse.broadcast({
+      type: 'team_delivery_status_change',
+      team_id,
+      run_id,
+      delivery_id: claimed.delivery.delivery_id,
+      member_id: claimed.member.member_id,
+      status: 'running',
+    });
+
+    await runClaimedTeamDelivery({
+      deps,
+      permissions,
+      delivery: claimed.delivery,
+      message: claimed.message,
+      member: claimed.member,
+    });
+  }
+
+  deps.store.completeRunIfNoOpenDeliveries(run_id);
+}
+
+async function runClaimedTeamDelivery({
+  deps,
+  permissions,
+  delivery,
+  message,
+  member,
+}: {
+  deps: AppDeps;
+  permissions: PermissionBroker;
+  delivery: TeamMessageDeliveryRecord;
+  message: TeamMessageRecord;
+  member: TeamMemberRecord;
+}): Promise<void> {
+  const session = deps.store.get(member.session_id);
+  const adapter = session ? deps.adapters.get(session.coding_agent) : undefined;
+  const fail = (error: string) => {
+    deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'failed', error);
+    deps.store.updateTeamMemberStatus(member.member_id, 'error', null);
+    if (session) deps.store.recordError(session.session_id, error);
+    if (session) deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'error' });
+    deps.sse.broadcast({
+      type: 'team_delivery_status_change',
+      team_id: delivery.team_id,
+      run_id: delivery.run_id,
+      delivery_id: delivery.delivery_id,
+      member_id: member.member_id,
+      status: 'failed',
+    });
+  };
+
+  if (!session) {
+    fail('team member session not found');
+    return;
+  }
+  if (!adapter) {
+    fail(`unknown agent: ${session.coding_agent}`);
+    return;
+  }
+
+  deps.store.updateStatus(session.session_id, 'running');
+  deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
+
+  const handlers: PromptHandlers = {
+    onTextDelta: (delta) =>
+      deps.sse.broadcast({
+        type: 'team_text_delta',
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        delivery_id: delivery.delivery_id,
+        member_id: member.member_id,
+        text: delta,
+      }),
+    onToolCallStart: () => {},
+    onToolCallEnd: () => {},
+    onThinkingDelta: () => {},
+    onStatusNote: (note) =>
+      deps.sse.broadcast({
+        type: 'team_text_delta',
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        delivery_id: delivery.delivery_id,
+        member_id: member.member_id,
+        text: note,
+      }),
+    onStatusChange: (status) => {
+      const current = deps.store.get(session.session_id);
+      if (current && current.status === status) return;
+      deps.store.updateStatus(session.session_id, status);
+      deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status });
+    },
+    onPermissionRequest: async (request_id, tool_name, input) => {
+      deps.store.updateTeamMemberStatus(member.member_id, 'waiting_permission', delivery.delivery_id);
+      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input });
+      const decision = await permissions.request(session.session_id, request_id);
+      deps.store.updateTeamMemberStatus(member.member_id, 'running', delivery.delivery_id);
+      return decision;
+    },
+  };
+
+  try {
+    const dependencies = deps.store.listDeliveryDependencies(delivery.delivery_id);
+    const runItems = deps.store.getTeamRun(delivery.run_id);
+    await adapter.prompt(
+      session.real_session_id,
+      session.cwd,
+      deliveryPrompt({ delivery, message, dependencies, runItems }),
+      handlers,
+    );
+
+    deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'done');
+    deps.store.updateTeamMemberStatus(member.member_id, 'idle', null);
+    const current = deps.store.get(session.session_id);
+    if (current && current.status === 'running') {
+      deps.store.updateStatus(session.session_id, 'completed');
+      deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'completed' });
+    }
+    deps.sse.broadcast({
+      type: 'team_delivery_status_change',
+      team_id: delivery.team_id,
+      run_id: delivery.run_id,
+      delivery_id: delivery.delivery_id,
+      member_id: member.member_id,
+      status: 'done',
+    });
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -803,13 +992,38 @@ function leaderOnlyPrompt({
     `When returning a plan, each assignments[].to MUST be exactly one of: ${availableRoles.join(', ')}.`,
     'Do not invent roles or assign work to roles that are not listed above.',
     'If the work needs a role that is missing from the team, assign the closest existing role and mention the limitation in context.',
-    'Return only one JSON object.',
+    'Return only one strict JSON object.',
+    'Do not write prose, markdown, or explanations outside the JSON object.',
+    'Escape every double quote inside JSON string values as \\".',
+    'Escape every newline inside JSON string values as \\n; do not put literal line breaks inside a string value.',
+    'Prefer single quotes or parentheses inside result text instead of raw double quotes.',
     '',
     'Final shape:',
     '{"type":"final","summary":"short summary","result":"final answer for the user"}',
     '',
     'Plan shape:',
     '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
+  ].join('\n');
+}
+
+function leaderJsonRetryPrompt(previous: string, error: string): string {
+  return [
+    'Your previous leader response could not be parsed by JSON.parse.',
+    `Parser error: ${error}`,
+    '',
+    'Rewrite the same intent as exactly one strict JSON object.',
+    'Do not add prose, markdown fences, or comments.',
+    'Allowed shapes:',
+    '{"type":"final","summary":"short summary","result":"final answer for the user"}',
+    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
+    '',
+    'Strict JSON reminders:',
+    '- Escape every double quote inside string values as \\".',
+    '- Escape every newline inside string values as \\n.',
+    '- Use type "final", not "final answer".',
+    '',
+    'Previous response to rewrite:',
+    previous,
   ].join('\n');
 }
 
@@ -867,8 +1081,95 @@ function parseLeaderJson(raw: string): { value: Record<string, unknown> } | { er
     }
     return { value: value as Record<string, unknown> };
   } catch {
+    const repaired = repairLooseFinalJson(candidate);
+    if (repaired) return { value: repaired };
     return { error: 'leader response was not valid JSON' };
   }
+}
+
+function shouldRetryLeaderJson(raw: string, error: string): boolean {
+  if (raw.length === 0) return false;
+  return [
+    'leader response was not valid JSON',
+    'leader response did not contain JSON',
+    'leader response type must be final or plan',
+    'leader JSON must be an object',
+  ].includes(error);
+}
+
+function repairLooseFinalJson(candidate: string): Record<string, unknown> | undefined {
+  if (!/"type"\s*:\s*"final"\s*(?:,|})/m.test(candidate)) return undefined;
+
+  const summary = extractLooseStringField(candidate, 'summary', ['result']);
+  const result = extractLooseStringField(candidate, 'result');
+  if (summary === undefined || result === undefined || result.trim() === '') return undefined;
+
+  return { type: 'final', summary, result };
+}
+
+function extractLooseStringField(candidate: string, field: string, nextFields: string[] = []): string | undefined {
+  const key = new RegExp(`"${escapeRegExp(field)}"\\s*:\\s*"`, 'm');
+  const match = key.exec(candidate);
+  if (!match || match.index === undefined) return undefined;
+
+  const start = match.index + match[0].length;
+  let end = -1;
+  for (const nextField of nextFields) {
+    const next = new RegExp(`"\\s*,\\s*"${escapeRegExp(nextField)}"\\s*:`, 'm').exec(candidate.slice(start));
+    if (next && next.index !== undefined) {
+      end = start + next.index;
+      break;
+    }
+  }
+
+  if (end === -1) {
+    const objectEnd = candidate.lastIndexOf('}');
+    if (objectEnd === -1) return undefined;
+    end = candidate.lastIndexOf('"', objectEnd);
+  }
+  if (end < start) return undefined;
+
+  return decodeLooseJsonString(candidate.slice(start, end));
+}
+
+function decodeLooseJsonString(value: string): string {
+  let decoded = '';
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char !== '\\') {
+      decoded += char;
+      continue;
+    }
+
+    const next = value[index + 1];
+    if (next === undefined) {
+      decoded += char;
+      continue;
+    }
+    if (next === 'u' && /^[0-9a-fA-F]{4}$/.test(value.slice(index + 2, index + 6))) {
+      decoded += String.fromCharCode(Number.parseInt(value.slice(index + 2, index + 6), 16));
+      index += 5;
+      continue;
+    }
+
+    const escapes: Record<string, string> = {
+      '"': '"',
+      '\\': '\\',
+      '/': '/',
+      b: '\b',
+      f: '\f',
+      n: '\n',
+      r: '\r',
+      t: '\t',
+    };
+    decoded += escapes[next] ?? next;
+    index += 1;
+  }
+  return decoded;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function validateLeaderPlan(raw: Record<string, unknown>, members: TeamWithMembers['members']): LeaderOutcome {
@@ -963,6 +1264,53 @@ function assignmentContent(assignment: ValidatedPlanAssignment): string {
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+function deliveryPrompt({
+  delivery,
+  message,
+  dependencies,
+  runItems,
+}: {
+  delivery: TeamMessageDeliveryRecord;
+  message: TeamMessageRecord;
+  dependencies: Array<{ depends_on_delivery_id: string; dependency_type: TeamDeliveryDependencyType }>;
+  runItems: TeamRunWithItems | undefined;
+}): string {
+  const dependencyLines = dependencies.map((dependency) => {
+    const upstream = runItems?.deliveries.find((item) => item.delivery_id === dependency.depends_on_delivery_id);
+    const upstreamMessage = upstream
+      ? runItems?.messages.find((item) => item.message_id === upstream.message_id)
+      : undefined;
+    return [
+      `- ${dependency.depends_on_delivery_id}: requires ${dependency.dependency_type}, status=${upstream?.status ?? 'unknown'}`,
+      upstream?.error ? `  Error: ${upstream.error}` : '',
+      upstreamMessage ? `  Summary: ${compactForPrompt(upstreamMessage.content)}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  });
+
+  return [
+    `New delivery: ${delivery.delivery_id}`,
+    `Run: ${delivery.run_id}`,
+    '',
+    'Task:',
+    message.content,
+    '',
+    'Dependency summaries:',
+    dependencyLines.length > 0 ? dependencyLines.join('\n') : '- none',
+    '',
+    'Expected output:',
+    '- Complete the assigned task in this existing team session.',
+    '- Report a concise result, blocker, or failure for the leader.',
+  ].join('\n');
+}
+
+function compactForPrompt(value: string): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= 240) return normalized;
+  return `${normalized.slice(0, 237)}...`;
 }
 
 function initializationHandlers(role: string): PromptHandlers {

@@ -417,6 +417,178 @@ export class SessionStore {
       .run(status, status, now, status, now, error, delivery_id);
   }
 
+  releaseSatisfiedBlockedDeliveries(run_id: string): TeamMessageDeliveryRecord[] {
+    const release = this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT delivery_id, message_id, team_id, run_id, to_member_id, status, enqueue_seq,
+                  created_at, started_at, finished_at, error
+           FROM team_message_delivery delivery
+           WHERE delivery.run_id = ?
+             AND delivery.status = 'blocked'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM team_delivery_dependency dep
+               JOIN team_message_delivery upstream
+                 ON upstream.delivery_id = dep.depends_on_delivery_id
+               WHERE dep.delivery_id = delivery.delivery_id
+                 AND (
+                   (dep.dependency_type = 'success' AND upstream.status != 'done')
+                   OR (dep.dependency_type = 'finished' AND upstream.status NOT IN ('done', 'failed', 'cancelled'))
+                 )
+             )
+           ORDER BY delivery.created_at ASC, delivery.enqueue_seq ASC, delivery.delivery_id ASC`,
+        )
+        .all(run_id) as TeamDeliveryRow[];
+      if (rows.length === 0) return [];
+
+      const update = this.db.prepare(`UPDATE team_message_delivery SET status = 'pending' WHERE delivery_id = ?`);
+      for (const row of rows) update.run(row.delivery_id);
+      return rows.map((row) => toTeamDelivery({ ...row, status: 'pending' }));
+    });
+
+    return release();
+  }
+
+  claimNextRunnableTeamDelivery(run_id: string): {
+    delivery: TeamMessageDeliveryRecord;
+    message: TeamMessageRecord;
+    member: TeamMemberRecord;
+  } | undefined {
+    const claim = this.db.transaction(() => {
+      const running = this.db
+        .prepare(
+          `SELECT 1
+           FROM team_message_delivery
+           WHERE run_id = ? AND status = 'running'
+           LIMIT 1`,
+        )
+        .get(run_id);
+      if (running) return undefined;
+
+      const row = this.db
+        .prepare(
+          `SELECT delivery.delivery_id, delivery.message_id, delivery.team_id, delivery.run_id,
+                  delivery.to_member_id, delivery.status, delivery.enqueue_seq, delivery.created_at,
+                  delivery.started_at, delivery.finished_at, delivery.error
+           FROM team_message_delivery delivery
+           JOIN team_member member ON member.member_id = delivery.to_member_id
+           WHERE delivery.run_id = ?
+             AND delivery.status = 'pending'
+             AND member.status = 'idle'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM team_delivery_dependency dep
+               JOIN team_message_delivery upstream
+                 ON upstream.delivery_id = dep.depends_on_delivery_id
+               WHERE dep.delivery_id = delivery.delivery_id
+                 AND (
+                   (dep.dependency_type = 'success' AND upstream.status != 'done')
+                   OR (dep.dependency_type = 'finished' AND upstream.status NOT IN ('done', 'failed', 'cancelled'))
+                 )
+             )
+           ORDER BY delivery.created_at ASC, delivery.enqueue_seq ASC, delivery.delivery_id ASC
+           LIMIT 1`,
+        )
+        .get(run_id) as TeamDeliveryRow | undefined;
+      if (!row) return undefined;
+
+      const now = Date.now();
+      this.db
+        .prepare(
+          `UPDATE team_message_delivery
+           SET status = 'running',
+               started_at = CASE WHEN started_at IS NULL THEN ? ELSE started_at END,
+               error = NULL
+           WHERE delivery_id = ? AND status = 'pending'`,
+        )
+        .run(now, row.delivery_id);
+      this.db
+        .prepare(`UPDATE team_member SET status = 'running', current_delivery_id = ?, modify_time = ? WHERE member_id = ?`)
+        .run(row.delivery_id, now, row.to_member_id);
+
+      return {
+        delivery: toTeamDelivery({ ...row, status: 'running', started_at: row.started_at ?? now, error: null }),
+        message: this.getTeamMessage(row.message_id)!,
+        member: this.getTeamMember(row.to_member_id)!,
+      };
+    });
+
+    return claim();
+  }
+
+  getTeamMember(member_id: string): TeamMemberRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT member_id, team_id, role, coding_agent, session_id, model, responsibility_prompt,
+                status, current_delivery_id, create_time, modify_time
+         FROM team_member WHERE member_id = ?`,
+      )
+      .get(member_id) as TeamMemberRow | undefined;
+    return row ? toTeamMember(row) : undefined;
+  }
+
+  getTeamMessage(message_id: string): TeamMessageRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT message_id, team_id, run_id, from_member_id, from_kind, kind, content, create_time
+         FROM team_message WHERE message_id = ?`,
+      )
+      .get(message_id) as TeamMessageRow | undefined;
+    return row ? toTeamMessage(row) : undefined;
+  }
+
+  listDeliveryDependencies(delivery_id: string): TeamDeliveryDependencyRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT delivery_id, depends_on_delivery_id, dependency_type
+         FROM team_delivery_dependency
+         WHERE delivery_id = ?
+         ORDER BY depends_on_delivery_id ASC`,
+      )
+      .all(delivery_id) as TeamDependencyRow[];
+    return rows.map(toTeamDependency);
+  }
+
+  completeRunIfNoOpenDeliveries(run_id: string): TeamRunRecord | undefined {
+    const complete = this.db.transaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT run_id, team_id, root_user_message_id, status, max_rounds, current_round, create_time, finish_time
+           FROM team_run WHERE run_id = ?`,
+        )
+        .get(run_id) as TeamRunRow | undefined;
+      if (!row || row.status !== 'running') return undefined;
+
+      const open = this.db
+        .prepare(
+          `SELECT 1
+           FROM team_message_delivery
+           WHERE run_id = ? AND status IN ('blocked', 'pending', 'running')
+           LIMIT 1`,
+        )
+        .get(run_id);
+      if (open) return undefined;
+
+      const failed = this.db
+        .prepare(
+          `SELECT 1
+           FROM team_message_delivery
+           WHERE run_id = ? AND status = 'failed'
+           LIMIT 1`,
+        )
+        .get(run_id);
+      const status: TeamRunStatus = failed ? 'failed' : 'completed';
+      const teamStatus: TeamStatus = failed ? 'error' : 'idle';
+      const now = Date.now();
+      this.db.prepare(`UPDATE team_run SET status = ?, finish_time = ? WHERE run_id = ?`).run(status, now, run_id);
+      this.db.prepare(`UPDATE team SET status = ?, modify_time = ? WHERE team_id = ?`).run(teamStatus, now, row.team_id);
+      return toTeamRun({ ...row, status, finish_time: now });
+    });
+
+    return complete();
+  }
+
   finishTeamRun(run_id: string, status: TeamRunStatus): TeamRunRecord {
     this.db
       .prepare(`UPDATE team_run SET status = ?, finish_time = ? WHERE run_id = ?`)
@@ -593,7 +765,7 @@ export class SessionStore {
       .prepare(
         `SELECT delivery_id, message_id, team_id, run_id, to_member_id, status, enqueue_seq,
                 created_at, started_at, finished_at, error
-         FROM team_message_delivery WHERE run_id = ? ORDER BY enqueue_seq ASC`,
+         FROM team_message_delivery WHERE run_id = ? ORDER BY created_at ASC, enqueue_seq ASC, delivery_id ASC`,
       )
       .all(run_id) as TeamDeliveryRow[];
     return rows.map(toTeamDelivery);
