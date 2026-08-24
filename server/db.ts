@@ -2,6 +2,8 @@ import Database from 'better-sqlite3';
 import type { SessionRecord, SessionStatus } from '../shared/session';
 import type {
   TeamDeliveryStatus,
+  TeamDeliveryDependencyRecord,
+  TeamDeliveryDependencyType,
   TeamMemberRecord,
   TeamMessageDeliveryRecord,
   TeamMessageRecord,
@@ -65,6 +67,11 @@ export class SessionStore {
       CREATE INDEX IF NOT EXISTS idx_team_member_team
         ON team_member (team_id);
 
+      CREATE TABLE IF NOT EXISTS team_member_queue (
+        member_id TEXT PRIMARY KEY,
+        next_seq  INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS team_run (
         run_id               TEXT PRIMARY KEY,
         team_id              TEXT NOT NULL,
@@ -109,6 +116,16 @@ export class SessionStore {
 
       CREATE INDEX IF NOT EXISTS idx_team_delivery_run
         ON team_message_delivery (run_id, status, enqueue_seq);
+
+      CREATE TABLE IF NOT EXISTS team_delivery_dependency (
+        delivery_id            TEXT NOT NULL,
+        depends_on_delivery_id TEXT NOT NULL,
+        dependency_type        TEXT NOT NULL,
+        PRIMARY KEY (delivery_id, depends_on_delivery_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_team_dependency_upstream
+        ON team_delivery_dependency (depends_on_delivery_id);
     `);
 
     // `CREATE TABLE IF NOT EXISTS` cannot amend installations created before
@@ -235,7 +252,11 @@ export class SessionStore {
            (@member_id, @team_id, @role, @coding_agent, @session_id, @model, @responsibility_prompt,
             @status, @current_delivery_id, @create_time, @modify_time)`,
       );
-      for (const member of members) insertMember.run(member);
+      const insertQueue = this.db.prepare(`INSERT INTO team_member_queue (member_id, next_seq) VALUES (?, 1)`);
+      for (const member of members) {
+        insertMember.run(member);
+        insertQueue.run(member.member_id);
+      }
     });
 
     insert();
@@ -269,7 +290,19 @@ export class SessionStore {
       const deletedTeam = this.db.prepare(`DELETE FROM team WHERE team_id = ?`).run(team_id);
       if (deletedTeam.changes === 0) return false;
 
+      this.db
+        .prepare(
+          `DELETE FROM team_member_queue
+           WHERE member_id IN (SELECT member_id FROM team_member WHERE team_id = ?)`,
+        )
+        .run(team_id);
       this.db.prepare(`DELETE FROM team_member WHERE team_id = ?`).run(team_id);
+      this.db
+        .prepare(
+          `DELETE FROM team_delivery_dependency
+           WHERE delivery_id IN (SELECT delivery_id FROM team_message_delivery WHERE team_id = ?)`,
+        )
+        .run(team_id);
       this.db.prepare(`DELETE FROM team_message_delivery WHERE team_id = ?`).run(team_id);
       this.db.prepare(`DELETE FROM team_message WHERE team_id = ?`).run(team_id);
       this.db.prepare(`DELETE FROM team_run WHERE team_id = ?`).run(team_id);
@@ -329,7 +362,7 @@ export class SessionStore {
       this.insertTeamMessage(message);
       this.insertTeamDelivery(delivery);
       this.updateTeamStatus(input.team_id, 'running');
-      return { run, messages: [message], deliveries: [delivery] };
+      return { run, messages: [message], deliveries: [delivery], dependencies: [] };
     });
 
     return create();
@@ -348,6 +381,7 @@ export class SessionStore {
         run,
         messages: this.listTeamMessages(run.run_id),
         deliveries: this.listTeamDeliveries(run.run_id),
+        dependencies: this.listTeamDependencies(run.run_id),
       };
     });
   }
@@ -365,6 +399,7 @@ export class SessionStore {
       run,
       messages: this.listTeamMessages(run_id),
       deliveries: this.listTeamDeliveries(run_id),
+      dependencies: this.listTeamDependencies(run_id),
     };
   }
 
@@ -391,6 +426,90 @@ export class SessionStore {
 
   insertTeamMessageRecord(message: TeamMessageRecord): void {
     this.insertTeamMessage(message);
+  }
+
+  createPlanDeliveries(input: {
+    team_id: string;
+    run_id: string;
+    leader_member_id: string;
+    plan_message_id: string;
+    summary: string;
+    assignments: Array<{
+      message_id: string;
+      delivery_id: string;
+      to_member_id: string;
+      content: string;
+      blocked: boolean;
+      dependencies: Array<{ depends_on_delivery_id: string; dependency_type: TeamDeliveryDependencyType }>;
+    }>;
+    now: number;
+  }): {
+    plan_message: TeamMessageRecord;
+    assignment_messages: TeamMessageRecord[];
+    deliveries: TeamMessageDeliveryRecord[];
+    dependencies: TeamDeliveryDependencyRecord[];
+  } {
+    const create = this.db.transaction(() => {
+      const plan_message: TeamMessageRecord = {
+        message_id: input.plan_message_id,
+        team_id: input.team_id,
+        run_id: input.run_id,
+        from_member_id: input.leader_member_id,
+        from_kind: 'member',
+        kind: 'status',
+        content: input.summary,
+        create_time: input.now,
+      };
+      this.insertTeamMessage(plan_message);
+
+      const assignment_messages: TeamMessageRecord[] = [];
+      const deliveries: TeamMessageDeliveryRecord[] = [];
+      const dependencies: TeamDeliveryDependencyRecord[] = [];
+      for (const assignment of input.assignments) {
+        const message: TeamMessageRecord = {
+          message_id: assignment.message_id,
+          team_id: input.team_id,
+          run_id: input.run_id,
+          from_member_id: input.leader_member_id,
+          from_kind: 'member',
+          kind: 'assignment',
+          content: assignment.content,
+          create_time: input.now + assignment_messages.length + 1,
+        };
+        const delivery: TeamMessageDeliveryRecord = {
+          delivery_id: assignment.delivery_id,
+          message_id: assignment.message_id,
+          team_id: input.team_id,
+          run_id: input.run_id,
+          to_member_id: assignment.to_member_id,
+          status: assignment.blocked ? 'blocked' : 'pending',
+          enqueue_seq: this.nextMemberQueueSeq(assignment.to_member_id),
+          created_at: input.now + assignment_messages.length + 1,
+          started_at: null,
+          finished_at: null,
+          error: null,
+        };
+
+        this.insertTeamMessage(message);
+        this.insertTeamDelivery(delivery);
+        assignment_messages.push(message);
+        deliveries.push(delivery);
+
+        for (const dep of assignment.dependencies) {
+          const dependency: TeamDeliveryDependencyRecord = {
+            delivery_id: assignment.delivery_id,
+            depends_on_delivery_id: dep.depends_on_delivery_id,
+            dependency_type: dep.dependency_type,
+          };
+          this.insertTeamDependency(dependency);
+          dependencies.push(dependency);
+        }
+      }
+
+      return { plan_message, assignment_messages, deliveries, dependencies };
+    });
+
+    return create();
   }
 
   private listTeamMembers(team_id: string): TeamMemberRecord[] {
@@ -439,6 +558,26 @@ export class SessionStore {
       .run(delivery);
   }
 
+  private insertTeamDependency(dependency: TeamDeliveryDependencyRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO team_delivery_dependency
+           (delivery_id, depends_on_delivery_id, dependency_type)
+         VALUES
+           (@delivery_id, @depends_on_delivery_id, @dependency_type)`,
+      )
+      .run(dependency);
+  }
+
+  private nextMemberQueueSeq(member_id: string): number {
+    this.db.prepare(`INSERT OR IGNORE INTO team_member_queue (member_id, next_seq) VALUES (?, 1)`).run(member_id);
+    const row = this.db
+      .prepare(`SELECT next_seq FROM team_member_queue WHERE member_id = ?`)
+      .get(member_id) as { next_seq: number };
+    this.db.prepare(`UPDATE team_member_queue SET next_seq = ? WHERE member_id = ?`).run(row.next_seq + 1, member_id);
+    return row.next_seq;
+  }
+
   private listTeamMessages(run_id: string): TeamMessageRecord[] {
     const rows = this.db
       .prepare(
@@ -458,6 +597,19 @@ export class SessionStore {
       )
       .all(run_id) as TeamDeliveryRow[];
     return rows.map(toTeamDelivery);
+  }
+
+  private listTeamDependencies(run_id: string): TeamDeliveryDependencyRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT d.delivery_id, d.depends_on_delivery_id, d.dependency_type
+         FROM team_delivery_dependency d
+         JOIN team_message_delivery delivery ON delivery.delivery_id = d.delivery_id
+         WHERE delivery.run_id = ?
+         ORDER BY delivery.enqueue_seq ASC`,
+      )
+      .all(run_id) as TeamDependencyRow[];
+    return rows.map(toTeamDependency);
   }
 }
 
@@ -538,6 +690,12 @@ interface TeamDeliveryRow {
   error: string | null;
 }
 
+interface TeamDependencyRow {
+  delivery_id: string;
+  depends_on_delivery_id: string;
+  dependency_type: TeamDeliveryDependencyRecord['dependency_type'];
+}
+
 function toTeam(row: TeamRow): TeamRecord {
   return { ...row };
 }
@@ -555,5 +713,9 @@ function toTeamMessage(row: TeamMessageRow): TeamMessageRecord {
 }
 
 function toTeamDelivery(row: TeamDeliveryRow): TeamMessageDeliveryRecord {
+  return { ...row };
+}
+
+function toTeamDependency(row: TeamDependencyRow): TeamDeliveryDependencyRecord {
   return { ...row };
 }

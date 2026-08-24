@@ -112,6 +112,24 @@ describe('TeamChatView', () => {
             status: 'completed',
             create_time: 3,
           },
+          {
+            item_id: 'plan-1',
+            run_id: 'run-2',
+            kind: 'plan',
+            label: 'Plan',
+            text: 'Implement API work, then review it.',
+            status: 'running',
+            create_time: 4,
+          },
+          {
+            item_id: 'assignment-1',
+            run_id: 'run-2',
+            kind: 'assignment',
+            label: 'Assignment',
+            text: 'Assignment api -> backend-coder\n\nTask: Implement the API endpoint.',
+            status: 'pending',
+            create_time: 5,
+          },
         ]}
         onDraftChange={() => {}}
         onSubmit={() => {}}
@@ -125,6 +143,10 @@ describe('TeamChatView', () => {
     expect(markup).toContain('Final result');
     expect(markup).toContain('Settings page is ready.');
     expect(markup).toContain('completed');
+    expect(markup).toContain('Plan');
+    expect(markup).toContain('Implement API work, then review it.');
+    expect(markup).toContain('Assignment api -&gt; backend-coder');
+    expect(markup).toContain('pending');
   });
 
   it('handles loading and missing-team states cleanly', () => {

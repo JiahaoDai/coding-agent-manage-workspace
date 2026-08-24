@@ -10,11 +10,13 @@ import type { AgentAdapter, PromptHandlers } from '../shared/adapter';
 import type { ResumableSession, SessionRecord } from '../shared/session';
 import type {
   CreateTeamInput,
+  TeamDeliveryDependencyType,
   TeamMemberInput,
   TeamMemberRecord,
   TeamMessageRecord,
   TeamRecord,
   TeamRunRecord,
+  TeamWithMembers,
 } from '../shared/team';
 
 export interface AppDeps {
@@ -126,6 +128,7 @@ export function createApp(deps: AppDeps): Hono {
       run: created.run,
       delivery_id: delivery.delivery_id,
       text: text.trim(),
+      team_members: team.members,
     });
 
     return c.json(created, 202);
@@ -522,6 +525,7 @@ async function runLeaderOnlyDelivery({
   run,
   delivery_id,
   text,
+  team_members,
 }: {
   deps: AppDeps;
   permissions: PermissionBroker;
@@ -534,6 +538,7 @@ async function runLeaderOnlyDelivery({
   run: TeamRunRecord;
   delivery_id: string;
   text: string;
+  team_members: TeamWithMembers['members'];
 }): Promise<void> {
   const output: string[] = [];
 
@@ -589,10 +594,60 @@ async function runLeaderOnlyDelivery({
   };
 
   try {
-    await adapter.prompt(session.real_session_id, cwd, leaderOnlyPrompt({ team_name, leader, text }), handlers);
+    await adapter.prompt(
+      session.real_session_id,
+      cwd,
+      leaderOnlyPrompt({ team_name, leader, text, members: team_members }),
+      handlers,
+    );
 
-    const final = parseLeaderFinal(output.join(''));
-    if (!final) throw new Error('leader response did not contain a valid final JSON result');
+    const outcome = parseLeaderOutcome(output.join(''), team_members);
+    if ('error' in outcome) throw new Error(outcome.error);
+
+    if (outcome.type === 'plan') {
+      const planned = deps.store.createPlanDeliveries({
+        team_id,
+        run_id: run.run_id,
+        leader_member_id: leader.member_id,
+        plan_message_id: randomUUID(),
+        summary: outcome.summary,
+        assignments: outcome.assignments.map((assignment) => ({
+          message_id: randomUUID(),
+          delivery_id: assignment.delivery_id,
+          to_member_id: assignment.to_member_id,
+          content: assignmentContent(assignment),
+          blocked: assignment.dependencies.length > 0,
+          dependencies: assignment.dependencies,
+        })),
+        now: Date.now(),
+      });
+
+      deps.store.updateTeamDeliveryStatus(delivery_id, 'done');
+      deps.store.updateTeamMemberStatus(leader.member_id, 'idle', null);
+      const current = deps.store.get(session.session_id);
+      if (current && current.status === 'running') {
+        deps.store.updateStatus(session.session_id, 'completed');
+        deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'completed' });
+      }
+      deps.sse.broadcast({
+        type: 'team_delivery_status_change',
+        team_id,
+        run_id: run.run_id,
+        delivery_id,
+        member_id: leader.member_id,
+        status: 'done',
+      });
+      deps.sse.broadcast({
+        type: 'team_plan_created',
+        team_id,
+        run,
+        plan_message: planned.plan_message,
+        assignment_messages: planned.assignment_messages,
+        deliveries: planned.deliveries,
+        dependencies: planned.dependencies,
+      });
+      return;
+    }
 
     const finalMessage: TeamMessageRecord = {
       message_id: randomUUID(),
@@ -601,7 +656,7 @@ async function runLeaderOnlyDelivery({
       from_member_id: leader.member_id,
       from_kind: 'member',
       kind: 'final',
-      content: final.result,
+      content: outcome.result,
       create_time: Date.now(),
     };
     deps.store.insertTeamMessageRecord(finalMessage);
@@ -718,11 +773,19 @@ function leaderOnlyPrompt({
   team_name,
   leader,
   text,
+  members,
 }: {
   team_name: string;
   leader: TeamMemberRecord;
   text: string;
+  members: TeamWithMembers['members'];
 }): string {
+  const availableRoles = members.map((member) => member.role);
+  const memberLines = members.map((member) => {
+    const model = member.model ? `model=${member.model}` : 'model=agent-default';
+    return `- ${member.role}: agent=${member.coding_agent}, ${model}, responsibility=${member.responsibility_prompt}`;
+  });
+
   return [
     `Team: ${team_name}`,
     `Delivery target: ${leader.role}`,
@@ -733,30 +796,173 @@ function leaderOnlyPrompt({
     'User request:',
     text,
     '',
-    'This is the first leader-only orchestration step. Handle the request yourself and finish the team run.',
-    'Return only a JSON object in this shape:',
+    'Decide whether to finish now or create a plan for other team members.',
+    'Available member roles for assignments:',
+    ...memberLines,
+    '',
+    `When returning a plan, each assignments[].to MUST be exactly one of: ${availableRoles.join(', ')}.`,
+    'Do not invent roles or assign work to roles that are not listed above.',
+    'If the work needs a role that is missing from the team, assign the closest existing role and mention the limitation in context.',
+    'Return only one JSON object.',
+    '',
+    'Final shape:',
     '{"type":"final","summary":"short summary","result":"final answer for the user"}',
+    '',
+    'Plan shape:',
+    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
   ].join('\n');
 }
 
-function parseLeaderFinal(raw: string): { summary: string; result: string } | null {
+interface ValidatedPlanAssignment {
+  id: string;
+  to: string;
+  to_member_id: string;
+  task: string;
+  context: string;
+  delivery_id: string;
+  dependencies: Array<{ depends_on_delivery_id: string; dependency_type: TeamDeliveryDependencyType }>;
+  depends_on: string[];
+}
+
+type LeaderOutcome =
+  | { type: 'final'; summary: string; result: string }
+  | { type: 'plan'; summary: string; assignments: ValidatedPlanAssignment[] }
+  | { error: string };
+
+function parseLeaderOutcome(raw: string, members: TeamWithMembers['members']): LeaderOutcome {
+  const parsed = parseLeaderJson(raw);
+  if ('error' in parsed) return parsed;
+
+  if (parsed.value.type === 'final') {
+    if (typeof parsed.value.result !== 'string' || parsed.value.result.trim() === '') {
+      return { error: 'leader final result is required' };
+    }
+    return {
+      type: 'final',
+      summary: typeof parsed.value.summary === 'string' ? parsed.value.summary : '',
+      result: parsed.value.result.trim(),
+    };
+  }
+
+  if (parsed.value.type === 'plan') return validateLeaderPlan(parsed.value, members);
+
+  return { error: 'leader response type must be final or plan' };
+}
+
+function parseLeaderJson(raw: string): { value: Record<string, unknown> } | { error: string } {
   const trimmed = raw.trim();
-  if (!trimmed) return null;
+  if (!trimmed) return { error: 'leader response was empty' };
 
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  const candidate = fenced ? fenced[1].trim() : trimmed.slice(trimmed.indexOf('{'), trimmed.lastIndexOf('}') + 1);
-  if (!candidate) return null;
+  const jsonStart = trimmed.indexOf('{');
+  const jsonEnd = trimmed.lastIndexOf('}');
+  if (!fenced && jsonStart !== -1 && jsonEnd === -1) return { error: 'leader response was not valid JSON' };
+  const candidate = fenced ? fenced[1].trim() : trimmed.slice(jsonStart, jsonEnd + 1);
+  if (!candidate) return { error: 'leader response did not contain JSON' };
 
   try {
-    const parsed = JSON.parse(candidate) as { type?: unknown; summary?: unknown; result?: unknown };
-    if (parsed.type !== 'final' || typeof parsed.result !== 'string' || parsed.result.trim() === '') return null;
-    return {
-      summary: typeof parsed.summary === 'string' ? parsed.summary : '',
-      result: parsed.result.trim(),
-    };
+    const value = JSON.parse(candidate) as unknown;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return { error: 'leader JSON must be an object' };
+    }
+    return { value: value as Record<string, unknown> };
   } catch {
-    return null;
+    return { error: 'leader response was not valid JSON' };
   }
+}
+
+function validateLeaderPlan(raw: Record<string, unknown>, members: TeamWithMembers['members']): LeaderOutcome {
+  const summary = typeof raw.summary === 'string' ? raw.summary.trim() : '';
+  if (!summary) return { error: 'leader plan summary is required' };
+  if (!Array.isArray(raw.assignments) || raw.assignments.length === 0) {
+    return { error: 'leader plan assignments are required' };
+  }
+
+  const availableRoles = members.map((member) => member.role);
+  const memberByRole = new Map(members.map((member) => [member.role, member]));
+  const deliveryIdByAssignmentId = new Map<string, string>();
+  const assignments: Array<{
+    id: string;
+    to: string;
+    to_member_id: string;
+    task: string;
+    context: string;
+    depends_on: string[];
+    dependency_type: TeamDeliveryDependencyType;
+  }> = [];
+
+  for (const item of raw.assignments) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { error: 'leader plan assignment must be an object' };
+    }
+    const assignment = item as Record<string, unknown>;
+    const id = typeof assignment.id === 'string' ? assignment.id.trim() : '';
+    if (!id) return { error: 'leader plan assignment id is required' };
+    if (deliveryIdByAssignmentId.has(id)) return { error: `duplicate assignment id: ${id}` };
+
+    const to = typeof assignment.to === 'string' ? assignment.to.trim() : '';
+    const member = memberByRole.get(to);
+    if (!member) {
+      return {
+        error: `unknown assignment target role: ${to || '(empty)'}. Available roles: ${availableRoles.join(', ')}`,
+      };
+    }
+
+    const task = typeof assignment.task === 'string' ? assignment.task.trim() : '';
+    if (!task) return { error: `assignment ${id} task is required` };
+    const context = typeof assignment.context === 'string' ? assignment.context.trim() : '';
+    const rawDependsOn = assignment.depends_on ?? [];
+    if (!Array.isArray(rawDependsOn) || rawDependsOn.some((dep) => typeof dep !== 'string' || dep.trim() === '')) {
+      return { error: `assignment ${id} depends_on must be an array of assignment ids` };
+    }
+    const dependency_type = assignment.dependency_type ?? 'success';
+    if (dependency_type !== 'success' && dependency_type !== 'finished') {
+      return { error: `assignment ${id} dependency_type must be success or finished` };
+    }
+
+    const delivery_id = randomUUID();
+    deliveryIdByAssignmentId.set(id, delivery_id);
+    assignments.push({
+      id,
+      to,
+      to_member_id: member.member_id,
+      task,
+      context,
+      depends_on: rawDependsOn.map((dep) => dep.trim()),
+      dependency_type,
+    });
+  }
+
+  const validated: ValidatedPlanAssignment[] = [];
+  for (const assignment of assignments) {
+    const dependencies: ValidatedPlanAssignment['dependencies'] = [];
+    for (const dep of assignment.depends_on) {
+      const depends_on_delivery_id = deliveryIdByAssignmentId.get(dep);
+      if (!depends_on_delivery_id) {
+        return { error: `assignment ${assignment.id} depends on unknown assignment: ${dep}` };
+      }
+      dependencies.push({ depends_on_delivery_id, dependency_type: assignment.dependency_type });
+    }
+    validated.push({
+      ...assignment,
+      delivery_id: deliveryIdByAssignmentId.get(assignment.id)!,
+      dependencies,
+    });
+  }
+
+  return { type: 'plan', summary, assignments: validated };
+}
+
+function assignmentContent(assignment: ValidatedPlanAssignment): string {
+  return [
+    `Assignment ${assignment.id} -> ${assignment.to}`,
+    '',
+    `Task: ${assignment.task}`,
+    assignment.context ? `Context: ${assignment.context}` : '',
+    assignment.depends_on.length > 0 ? `Depends on: ${assignment.depends_on.join(', ')}` : 'Depends on: none',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function initializationHandlers(role: string): PromptHandlers {

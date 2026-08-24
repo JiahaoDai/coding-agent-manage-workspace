@@ -1253,6 +1253,11 @@ button {
   border-color: rgba(16, 163, 127, 0.35);
 }
 
+.team-run-event-plan,
+.team-run-event-assignment {
+  border-color: rgba(16, 163, 127, 0.24);
+}
+
 .team-run-event-error {
   border-color: rgba(239, 68, 68, 0.45);
 }

@@ -2,6 +2,7 @@ import type { ShellCommandResult } from './adapter';
 import type { SessionRecord, SessionStatus } from './session';
 import type {
   TeamDeliveryStatus,
+  TeamDeliveryDependencyRecord,
   TeamMessageDeliveryRecord,
   TeamMessageRecord,
   TeamRunRecord,
@@ -56,6 +57,16 @@ export type ServerEvent =
       team_id: string;
       run: TeamRunRecord;
       final_message: TeamMessageRecord;
+    }
+  | {
+      type: 'team_plan_created';
+      session_id?: undefined;
+      team_id: string;
+      run: TeamRunRecord;
+      plan_message: TeamMessageRecord;
+      assignment_messages: TeamMessageRecord[];
+      deliveries: TeamMessageDeliveryRecord[];
+      dependencies: TeamDeliveryDependencyRecord[];
     }
   | {
       type: 'team_run_failed';

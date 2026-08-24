@@ -125,9 +125,11 @@ Attempt 表示某个 delivery 的一次执行尝试。若 delivery 失败后重�
 - 第一版不支持用户手动插队，也不支持手动提高某个 delivery 的优先级。
 - 第一版不支持用户在 run 中途直接向某个 member 补充消息，后续再考虑。
 - Leader 的 assignment 输出第一版使用 JSON contract，通过 prompt 和 few-shot 约束 leader 输出结构化计划。
+- Leader 的 assignment 只能投递给当前 team 中已经存在的 member role。第一版不允许 leader 在 plan 中发明新 role，也不会因为 plan 里出现未知 role 自动创建 member；例如 team 没有 `architect` 时，`"to": "architect"` 会被视为规划错误。
 - 第一版采用全局串行 delivery 执行策略：同一个 team run 中任意时刻最多只有一个 delivery running。
 - `max_parallel_members` 可以保留在 schema 中，但第一版固定为 `1`，跨 member 并发留到后续版本。
 - Member 可以发送受控 message；V1 默认只能发送给 leader，由 leader 决定是否继续分配新任务、要求 review/fix 或结束 run。
+- 后续迭代可以允许 leader 提出“需要新增 member”的计划，例如建议创建 `architect`、`security-reviewer` 等角色，但这应作为显式 proposal 进入 UI，由用户确认后再创建 fresh member session，而不是在 assignment validation 中隐式创建。
 
 ---
 
@@ -473,6 +475,8 @@ leader final
 
 Leader 的 planning 和 re-plan 阶段应输出结构化 JSON，用于 Orchestrator 创建 message、delivery 和 dependency，或者结束 run。
 
+在组装 leader prompt 时，Orchestrator 必须列出当前 team 可用的 member roles，并要求 `assignments[].to` 精确匹配其中一个 role。这样 leader 只能把任务分给已经存在的 member，避免把任务投递给不存在的 `architect`、`designer` 等临时想出的角色。
+
 Plan 示例：
 
 ```json
@@ -524,6 +528,8 @@ Server 处理流程：
 2. 使用 schema 校验 `type`。
 3. 如果 `type = "plan"`，校验 `summary`、`assignments`、`to`、`depends_on`。
 4. 校验 `to` 必须是当前 team 的 member role。
+   - 如果 `to` 不是当前 team 的 member role，run 进入规划失败，不创建 assignment delivery。
+   - 错误信息应包含未知 role 和当前可用 roles，例如：`unknown assignment target role: architect. Available roles: leader, backend-coder, reviewer`。
 5. 校验 `depends_on` 必须指向同一 plan 中存在的 assignment id，或已经存在的 delivery/message 引用。
 6. 解析成功后创建 assignment message、delivery 和 dependency。
 7. 如果 `type = "final"`，创建 final message 并完成 run。
@@ -531,6 +537,25 @@ Server 处理流程：
 9. 解析失败时不创建 delivery，展示 leader 原始输出和错误，让 run 进入需要处理的规划失败状态。
 
 Leader 输出给机器，UI 负责把 JSON 渲染成用户友好的计划视图。不要要求 leader 同时输出自然语言和 JSON，避免解析不稳定。
+
+未来如果要让 agent 自己参与 team 结构规划，应新增单独 contract，例如：
+
+```json
+{
+  "type": "team_member_proposal",
+  "summary": "The task would benefit from a dedicated architecture reviewer.",
+  "proposed_members": [
+    {
+      "role": "architect",
+      "agent": "claude",
+      "model": null,
+      "responsibility_prompt": "Review architecture decisions and split work into implementable tasks."
+    }
+  ]
+}
+```
+
+该 proposal 只表达“建议新增成员”，不直接创建 delivery；UI 应展示建议，让用户确认、编辑 agent/model/prompt 后再创建 fresh member session。确认之前，leader plan 仍必须只使用现有 member roles。
 
 ---
 

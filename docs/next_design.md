@@ -34,3 +34,5 @@ client
 backend
 test
 自动分发任务，agent之间能够互相进行通信。
+
+目前是，查询有哪些team member，后续自动创建team member来处理

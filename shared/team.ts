@@ -15,6 +15,7 @@ export type TeamMessageKind =
   | 'error';
 export type TeamMessageFromKind = 'user' | 'member' | 'system';
 export type TeamDeliveryStatus = 'blocked' | 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+export type TeamDeliveryDependencyType = 'success' | 'finished';
 
 export interface TeamRecord {
   team_id: string;
@@ -80,10 +81,17 @@ export interface TeamMessageDeliveryRecord {
   error: string | null;
 }
 
+export interface TeamDeliveryDependencyRecord {
+  delivery_id: string;
+  depends_on_delivery_id: string;
+  dependency_type: TeamDeliveryDependencyType;
+}
+
 export interface TeamRunWithItems {
   run: TeamRunRecord;
   messages: TeamMessageRecord[];
   deliveries: TeamMessageDeliveryRecord[];
+  dependencies: TeamDeliveryDependencyRecord[];
 }
 
 export interface TeamMemberInput {

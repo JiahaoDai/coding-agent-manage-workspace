@@ -70,6 +70,26 @@ function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
           status: 'completed',
           create_time: message.create_time,
         });
+      } else if (message.kind === 'status') {
+        items.push({
+          item_id: `message:${message.message_id}`,
+          run_id: run.run.run_id,
+          kind: 'plan',
+          label: 'Plan',
+          text: message.content,
+          status: run.run.status,
+          create_time: message.create_time,
+        });
+      } else if (message.kind === 'assignment') {
+        items.push({
+          item_id: `message:${message.message_id}`,
+          run_id: run.run.run_id,
+          kind: 'assignment',
+          label: 'Assignment',
+          text: message.content,
+          status: run.deliveries.find((delivery) => delivery.message_id === message.message_id)?.status,
+          create_time: message.create_time,
+        });
       } else if (message.kind === 'error') {
         items.push({
           item_id: `message:${message.message_id}`,
@@ -90,8 +110,8 @@ function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
           item_id: `delivery:${delivery.delivery_id}:stream`,
           run_id: run.run.run_id,
           kind: 'leader_response',
-          label: 'Leader response',
-          text: delivery.status === 'done' ? 'Leader completed.' : '',
+          label: delivery.message_id === run.run.root_user_message_id ? 'Leader response' : 'Delivery',
+          text: delivery.status === 'done' ? 'Completed.' : '',
           status: delivery.status,
           create_time: delivery.started_at ?? delivery.created_at,
         });
@@ -334,6 +354,44 @@ export function App() {
               create_time: event.final_message.create_time,
             }),
           }));
+          setSendingTeamRequest((prev) => ({ ...prev, [event.team_id]: false }));
+          void listTeams().then(setTeams);
+          break;
+        case 'team_plan_created':
+          setTeamTimeline((prev) => {
+            let items = putTimelineItem(prev[event.team_id] ?? [], {
+              item_id: `message:${event.plan_message.message_id}`,
+              run_id: event.run.run_id,
+              kind: 'plan',
+              label: 'Plan',
+              text: event.plan_message.content,
+              status: event.run.status,
+              create_time: event.plan_message.create_time,
+            });
+            for (const message of event.assignment_messages) {
+              items = putTimelineItem(items, {
+                item_id: `message:${message.message_id}`,
+                run_id: event.run.run_id,
+                kind: 'assignment',
+                label: 'Assignment',
+                text: message.content,
+                status: event.deliveries.find((delivery) => delivery.message_id === message.message_id)?.status,
+                create_time: message.create_time,
+              });
+            }
+            for (const delivery of event.deliveries) {
+              items = putTimelineItem(items, {
+                item_id: `delivery:${delivery.delivery_id}:stream`,
+                run_id: event.run.run_id,
+                kind: 'leader_response',
+                label: 'Delivery',
+                text: '',
+                status: delivery.status,
+                create_time: delivery.created_at,
+              });
+            }
+            return { ...prev, [event.team_id]: items.sort((a, b) => a.create_time - b.create_time) };
+          });
           setSendingTeamRequest((prev) => ({ ...prev, [event.team_id]: false }));
           void listTeams().then(setTeams);
           break;
