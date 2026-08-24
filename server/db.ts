@@ -351,7 +351,7 @@ export class SessionStore {
         run_id: input.run_id,
         to_member_id: input.leader_member_id,
         status: 'pending',
-        enqueue_seq: 1,
+        enqueue_seq: this.nextMemberQueueSeq(input.leader_member_id),
         created_at: input.now,
         started_at: null,
         finished_at: null,
@@ -454,6 +454,22 @@ export class SessionStore {
     delivery: TeamMessageDeliveryRecord;
     message: TeamMessageRecord;
     member: TeamMemberRecord;
+  } | undefined;
+  claimNextRunnableTeamDelivery(
+    run_id: string,
+    options: { includeLeader: false },
+  ): {
+    delivery: TeamMessageDeliveryRecord;
+    message: TeamMessageRecord;
+    member: TeamMemberRecord;
+  } | undefined;
+  claimNextRunnableTeamDelivery(
+    run_id: string,
+    options: { includeLeader: boolean } = { includeLeader: true },
+  ): {
+    delivery: TeamMessageDeliveryRecord;
+    message: TeamMessageRecord;
+    member: TeamMemberRecord;
   } | undefined {
     const claim = this.db.transaction(() => {
       const running = this.db
@@ -476,6 +492,7 @@ export class SessionStore {
            WHERE delivery.run_id = ?
              AND delivery.status = 'pending'
              AND member.status = 'idle'
+             AND (? = 1 OR member.role != 'leader')
              AND NOT EXISTS (
                SELECT 1
                FROM team_delivery_dependency dep
@@ -490,7 +507,7 @@ export class SessionStore {
            ORDER BY delivery.created_at ASC, delivery.enqueue_seq ASC, delivery.delivery_id ASC
            LIMIT 1`,
         )
-        .get(run_id) as TeamDeliveryRow | undefined;
+        .get(run_id, options.includeLeader ? 1 : 0) as TeamDeliveryRow | undefined;
       if (!row) return undefined;
 
       const now = Date.now();
@@ -598,6 +615,50 @@ export class SessionStore {
 
   insertTeamMessageRecord(message: TeamMessageRecord): void {
     this.insertTeamMessage(message);
+  }
+
+  createMemberOutboundRoute(input: {
+    team_id: string;
+    run_id: string;
+    from_member_id: string;
+    leader_member_id: string;
+    message_id: string;
+    delivery_id: string;
+    kind: TeamMessageRecord['kind'];
+    content: string;
+    now: number;
+  }): { message: TeamMessageRecord; delivery: TeamMessageDeliveryRecord } {
+    const create = this.db.transaction(() => {
+      const message: TeamMessageRecord = {
+        message_id: input.message_id,
+        team_id: input.team_id,
+        run_id: input.run_id,
+        from_member_id: input.from_member_id,
+        from_kind: 'member',
+        kind: input.kind,
+        content: input.content,
+        create_time: input.now,
+      };
+      const delivery: TeamMessageDeliveryRecord = {
+        delivery_id: input.delivery_id,
+        message_id: input.message_id,
+        team_id: input.team_id,
+        run_id: input.run_id,
+        to_member_id: input.leader_member_id,
+        status: 'pending',
+        enqueue_seq: this.nextMemberQueueSeq(input.leader_member_id),
+        created_at: input.now,
+        started_at: null,
+        finished_at: null,
+        error: null,
+      };
+
+      this.insertTeamMessage(message);
+      this.insertTeamDelivery(delivery);
+      return { message, delivery };
+    });
+
+    return create();
   }
 
   createPlanDeliveries(input: {

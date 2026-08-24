@@ -4,10 +4,10 @@
 
 **Blocked by:** 05: Execute worker deliveries with global sequential scheduling.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Worker/reviewer outputs are converted into team messages with the right kind.
-- [ ] V1 routes member outbound messages to leader by default.
-- [ ] Direct worker-to-worker messages are not delivered directly; they are surfaced to leader for a decision.
-- [ ] A leader follow-up delivery is created after a member outbound message when the run is still active.
-- [ ] Tests cover result, review, need-info, proposal, failed, and attempted worker-to-worker routing.
+- [x] Worker/reviewer outputs are converted into team messages with the right kind.
+- [x] V1 routes member outbound messages to leader by default.
+- [x] Direct worker-to-worker messages are not delivered directly; they are surfaced to leader for a decision.
+- [x] A leader follow-up delivery is created after a member outbound message when the run is still active.
+- [x] Tests cover result, review, need-info, proposal, failed, and attempted worker-to-worker routing.

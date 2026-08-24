@@ -46,6 +46,14 @@ function putTimelineItem(prev: TeamTimelineItem[], item: TeamTimelineItem): Team
   return prev.map((entry, index) => (index === existing ? { ...entry, ...item } : entry));
 }
 
+function teamMessageTimelineMeta(kind: string): Pick<TeamTimelineItem, 'kind' | 'label'> | null {
+  if (kind === 'result') return { kind: 'result', label: 'Result' };
+  if (kind === 'review') return { kind: 'review', label: 'Review' };
+  if (kind === 'need_info') return { kind: 'need_info', label: 'Need info' };
+  if (kind === 'proposal') return { kind: 'proposal', label: 'Proposal' };
+  return null;
+}
+
 function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
   const items: TeamTimelineItem[] = [];
   for (const run of runs) {
@@ -95,11 +103,24 @@ function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
           item_id: `message:${message.message_id}`,
           run_id: run.run.run_id,
           kind: 'error',
-          label: 'Run error',
+          label: message.from_kind === 'member' ? 'Member error' : 'Run error',
           text: message.content,
           status: 'failed',
           create_time: message.create_time,
         });
+      } else {
+        const meta = teamMessageTimelineMeta(message.kind);
+        if (meta) {
+          items.push({
+            item_id: `message:${message.message_id}`,
+            run_id: run.run.run_id,
+            kind: meta.kind,
+            label: meta.label,
+            text: message.content,
+            status: run.deliveries.find((delivery) => delivery.message_id === message.message_id)?.status,
+            create_time: message.create_time,
+          });
+        }
       }
     }
 
@@ -334,7 +355,7 @@ export function App() {
                 item_id: itemId,
                 run_id: event.run_id,
                 kind: 'leader_response',
-                label: 'Leader response',
+                label: existing?.label ?? 'Leader response',
                 text: `${existing?.text ?? ''}${event.text}`,
                 status: existing?.status ?? 'running',
                 create_time: existing?.create_time ?? Date.now(),
@@ -394,6 +415,36 @@ export function App() {
             return { ...prev, [event.team_id]: items.sort((a, b) => a.create_time - b.create_time) };
           });
           setSendingTeamRequest((prev) => ({ ...prev, [event.team_id]: false }));
+          void listTeams().then(setTeams);
+          break;
+        case 'team_message_created':
+          setTeamTimeline((prev) => {
+            let items = prev[event.team_id] ?? [];
+            const meta = teamMessageTimelineMeta(event.message.kind);
+            if (meta || event.message.kind === 'error') {
+              items = putTimelineItem(items, {
+                item_id: `message:${event.message.message_id}`,
+                run_id: event.message.run_id,
+                kind: meta?.kind ?? 'error',
+                label: meta?.label ?? 'Member error',
+                text: event.message.content,
+                status: event.delivery?.status,
+                create_time: event.message.create_time,
+              });
+            }
+            if (event.delivery) {
+              items = putTimelineItem(items, {
+                item_id: `delivery:${event.delivery.delivery_id}:stream`,
+                run_id: event.delivery.run_id,
+                kind: 'leader_response',
+                label: 'Leader follow-up',
+                text: '',
+                status: event.delivery.status,
+                create_time: event.delivery.created_at,
+              });
+            }
+            return { ...prev, [event.team_id]: items.sort((a, b) => a.create_time - b.create_time) };
+          });
           void listTeams().then(setTeams);
           break;
         case 'team_run_failed':

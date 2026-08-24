@@ -69,6 +69,13 @@ export type ServerEvent =
       dependencies: TeamDeliveryDependencyRecord[];
     }
   | {
+      type: 'team_message_created';
+      session_id?: undefined;
+      team_id: string;
+      message: TeamMessageRecord;
+      delivery: TeamMessageDeliveryRecord | null;
+    }
+  | {
       type: 'team_run_failed';
       session_id?: undefined;
       team_id: string;

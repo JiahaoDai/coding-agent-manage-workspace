@@ -4,7 +4,7 @@ import type { TeamWithMembers } from '../types';
 export interface TeamTimelineItem {
   item_id: string;
   run_id: string;
-  kind: 'user_request' | 'leader_response' | 'plan' | 'assignment' | 'final' | 'error';
+  kind: 'user_request' | 'leader_response' | 'plan' | 'assignment' | 'result' | 'review' | 'need_info' | 'proposal' | 'final' | 'error';
   label: string;
   text: string;
   status?: string;

@@ -712,14 +712,11 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         dependencies: Array<{ delivery_id: string; depends_on_delivery_id: string; dependency_type: string }>;
       }>;
       expect(runs).toHaveLength(1);
-      expect(runs[0].run.status).toBe('completed');
-      expect(runs[0].messages.map((message) => message.kind)).toEqual([
-        'user_request',
-        'status',
-        'assignment',
-        'assignment',
-        'assignment',
-      ]);
+      expect(runs[0].run.status).toBe('running');
+      const messageKinds = runs[0].messages.map((message) => message.kind);
+      expect(messageKinds.slice(0, 2)).toEqual(['user_request', 'status']);
+      expect(messageKinds.filter((kind) => kind === 'assignment')).toHaveLength(3);
+      expect(messageKinds.filter((kind) => kind === 'result')).toHaveLength(3);
 
       const backendDeliveries = runs[0].deliveries.filter((delivery) => delivery.to_member_id === backend.member_id);
       expect(backendDeliveries.map((delivery) => delivery.enqueue_seq)).toEqual([1, 2]);
@@ -732,7 +729,7 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
       expect(runs[0].dependencies).toEqual(planEvent!.dependencies);
 
       const listedTeams = await (await fetch(`${baseUrl}/api/teams`)).json() as Array<{ team_id: string; status: string }>;
-      expect(listedTeams[0]).toMatchObject({ team_id: team.team_id, status: 'idle' });
+      expect(listedTeams[0]).toMatchObject({ team_id: team.team_id, status: 'running' });
 
       await reader.cancel();
     } finally {
@@ -835,8 +832,16 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         run: { status: string };
         deliveries: Array<{ status: string; to_member_id: string; enqueue_seq: number }>;
       }>;
-      expect(runs[0].run.status).toBe('completed');
-      expect(runs[0].deliveries.map((delivery) => delivery.status)).toEqual(['done', 'done', 'done', 'done']);
+      expect(runs[0].run.status).toBe('running');
+      expect(runs[0].deliveries.map((delivery) => delivery.status)).toEqual([
+        'done',
+        'done',
+        'done',
+        'done',
+        'pending',
+        'pending',
+        'pending',
+      ]);
 
       const backend = team.members.find((member) => member.role === 'backend-coder')!;
       expect(runs[0].deliveries.filter((delivery) => delivery.to_member_id === backend.member_id).map((delivery) => delivery.enqueue_seq)).toEqual([1, 2]);
@@ -931,6 +936,157 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
       );
       expect(completed!.final_message.content).toBe('Leader rewrote the answer as strict JSON.');
       expect(fake.promptCalls.some((call) => call.input.includes('Previous response to rewrite:'))).toBe(true);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it.each([
+    { output: 'RESULT: Implemented the endpoint.', expectedKind: 'result', expectedContent: 'Implemented the endpoint.', role: 'backend-coder' },
+    { output: 'REVIEW: Looks good, tests pass.', expectedKind: 'review', expectedContent: 'Looks good, tests pass.', role: 'reviewer' },
+    { output: 'NEED_INFO: Which database should store team state?', expectedKind: 'need_info', expectedContent: 'Which database should store team state?', role: 'backend-coder' },
+    { output: 'PROPOSAL: Ask reviewer to inspect auth risk.', expectedKind: 'proposal', expectedContent: 'Ask reviewer to inspect auth risk.', role: 'backend-coder' },
+    { output: 'FAILED: Build failed because migration is missing.', expectedKind: 'error', expectedContent: 'Build failed because migration is missing.', role: 'backend-coder' },
+  ])(
+    'routes $expectedKind member outbound messages back to leader',
+    async ({ output, expectedKind, expectedContent, role }) => {
+      const { db, fake, server, baseUrl } = await startServer();
+      try {
+        fake.promptScript = (handlers, ctx) => {
+          if (ctx.input.includes('User request:')) {
+            handlers.onTextDelta(JSON.stringify({
+              type: 'plan',
+              summary: `Send work to ${role}.`,
+              assignments: [
+                {
+                  id: 'one-task',
+                  to: role,
+                  task: 'Do one task.',
+                  context: 'Report back to leader.',
+                  depends_on: [],
+                },
+              ],
+            }));
+          } else if (ctx.input.includes('New delivery:')) {
+            handlers.onTextDelta(output);
+          }
+          handlers.onStatusChange('completed');
+        };
+
+        const team = await createPlanningTeam(baseUrl);
+        const leader = team.members.find((member) => member.role === 'leader')!;
+        const worker = team.members.find((member) => member.role === role)!;
+        const sseRes = await fetch(`${baseUrl}/api/events`);
+        const reader = sseRes.body!.getReader();
+        await sleep(30);
+
+        const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+          text: `Create a ${expectedKind} message.`,
+        });
+        expect(runResponse.status).toBe(202);
+
+        const events = await collectEvents(
+          reader,
+          (evs) => evs.some((event) => event.type === 'team_message_created'),
+        );
+        const routed = events.find(
+          (event): event is Extract<ServerEvent, { type: 'team_message_created' }> =>
+            event.type === 'team_message_created',
+        );
+        expect(routed).toBeTruthy();
+        expect(routed!.message).toMatchObject({
+          from_member_id: worker.member_id,
+          from_kind: 'member',
+          kind: expectedKind,
+          content: expectedContent,
+        });
+        expect(routed!.delivery).toMatchObject({
+          to_member_id: leader.member_id,
+          status: 'pending',
+          enqueue_seq: 2,
+        });
+
+        const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+          run: { status: string };
+          messages: Array<{ kind: string; content: string; from_member_id: string | null }>;
+          deliveries: Array<{ message_id: string; to_member_id: string; status: string; error: string | null }>;
+        }>;
+        expect(runs[0].run.status).toBe('running');
+        expect(runs[0].messages.some((message) => message.kind === expectedKind && message.content === expectedContent)).toBe(true);
+        const originalDelivery = runs[0].deliveries.find((delivery) => delivery.to_member_id === worker.member_id)!;
+        expect(originalDelivery.status).toBe(expectedKind === 'error' ? 'failed' : 'done');
+        expect(originalDelivery.error).toBe(expectedKind === 'error' ? expectedContent : null);
+        expect(runs[0].deliveries.some((delivery) => delivery.to_member_id === leader.member_id && delivery.status === 'pending')).toBe(true);
+
+        await reader.cancel();
+      } finally {
+        server.close();
+        db.close();
+      }
+    },
+  );
+
+  it('surfaces attempted worker-to-worker messages to leader instead of delivering them directly', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Ask backend to coordinate review.',
+            assignments: [
+              {
+                id: 'coordinate-review',
+                to: 'backend-coder',
+                task: 'Ask reviewer to inspect the API.',
+                context: 'Use MESSAGE_TO if you think another member should act.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          handlers.onTextDelta('MESSAGE_TO reviewer: Please review the API route.');
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const leader = team.members.find((member) => member.role === 'leader')!;
+      const backend = team.members.find((member) => member.role === 'backend-coder')!;
+      const reviewer = team.members.find((member) => member.role === 'reviewer')!;
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Coordinate review.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_message_created'),
+      );
+      const routed = events.find(
+        (event): event is Extract<ServerEvent, { type: 'team_message_created' }> =>
+          event.type === 'team_message_created',
+      );
+      expect(routed!.message).toMatchObject({
+        from_member_id: backend.member_id,
+        kind: 'proposal',
+      });
+      expect(routed!.message.content).toContain('Attempted message to reviewer.');
+      expect(routed!.message.content).toContain('Please review the API route.');
+      expect(routed!.delivery).toMatchObject({ to_member_id: leader.member_id, status: 'pending' });
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        deliveries: Array<{ to_member_id: string; status: string }>;
+      }>;
+      expect(runs[0].deliveries.filter((delivery) => delivery.to_member_id === reviewer.member_id)).toEqual([]);
+      expect(runs[0].deliveries.filter((delivery) => delivery.to_member_id === leader.member_id && delivery.status === 'pending')).toHaveLength(1);
 
       await reader.cancel();
     } finally {

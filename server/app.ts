@@ -14,6 +14,7 @@ import type {
   TeamMemberInput,
   TeamMemberRecord,
   TeamMessageDeliveryRecord,
+  TeamMessageKind,
   TeamMessageRecord,
   TeamRecord,
   TeamRunRecord,
@@ -768,7 +769,7 @@ async function runSequentialWorkerDeliveries({
       });
     }
 
-    const claimed = deps.store.claimNextRunnableTeamDelivery(run_id);
+    const claimed = deps.store.claimNextRunnableTeamDelivery(run_id, { includeLeader: false });
     if (!claimed) break;
 
     deps.sse.broadcast({
@@ -807,6 +808,7 @@ async function runClaimedTeamDelivery({
 }): Promise<void> {
   const session = deps.store.get(member.session_id);
   const adapter = session ? deps.adapters.get(session.coding_agent) : undefined;
+  const output: string[] = [];
   const fail = (error: string) => {
     deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'failed', error);
     deps.store.updateTeamMemberStatus(member.member_id, 'error', null);
@@ -835,7 +837,8 @@ async function runClaimedTeamDelivery({
   deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
 
   const handlers: PromptHandlers = {
-    onTextDelta: (delta) =>
+    onTextDelta: (delta) => {
+      output.push(delta);
       deps.sse.broadcast({
         type: 'team_text_delta',
         team_id: delivery.team_id,
@@ -843,11 +846,13 @@ async function runClaimedTeamDelivery({
         delivery_id: delivery.delivery_id,
         member_id: member.member_id,
         text: delta,
-      }),
+      });
+    },
     onToolCallStart: () => {},
     onToolCallEnd: () => {},
     onThinkingDelta: () => {},
-    onStatusNote: (note) =>
+    onStatusNote: (note) => {
+      output.push(note);
       deps.sse.broadcast({
         type: 'team_text_delta',
         team_id: delivery.team_id,
@@ -855,7 +860,8 @@ async function runClaimedTeamDelivery({
         delivery_id: delivery.delivery_id,
         member_id: member.member_id,
         text: note,
-      }),
+      });
+    },
     onStatusChange: (status) => {
       const current = deps.store.get(session.session_id);
       if (current && current.status === status) return;
@@ -881,8 +887,16 @@ async function runClaimedTeamDelivery({
       handlers,
     );
 
-    deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'done');
+    const outbound = parseMemberOutbound(output.join(''));
+    const deliveryStatus = outbound.kind === 'error' ? 'failed' : 'done';
+    deps.store.updateTeamDeliveryStatus(delivery.delivery_id, deliveryStatus, outbound.kind === 'error' ? outbound.content : null);
     deps.store.updateTeamMemberStatus(member.member_id, 'idle', null);
+    const routed = routeMemberOutboundToLeader({
+      deps,
+      delivery,
+      member,
+      outbound,
+    });
     const current = deps.store.get(session.session_id);
     if (current && current.status === 'running') {
       deps.store.updateStatus(session.session_id, 'completed');
@@ -894,11 +908,47 @@ async function runClaimedTeamDelivery({
       run_id: delivery.run_id,
       delivery_id: delivery.delivery_id,
       member_id: member.member_id,
-      status: 'done',
+      status: deliveryStatus,
     });
+    if (routed) {
+      deps.sse.broadcast({
+        type: 'team_message_created',
+        team_id: delivery.team_id,
+        message: routed.message,
+        delivery: routed.delivery,
+      });
+    }
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }
+}
+
+function routeMemberOutboundToLeader({
+  deps,
+  delivery,
+  member,
+  outbound,
+}: {
+  deps: AppDeps;
+  delivery: TeamMessageDeliveryRecord;
+  member: TeamMemberRecord;
+  outbound: ParsedMemberOutbound;
+}): { message: TeamMessageRecord; delivery: TeamMessageDeliveryRecord } | undefined {
+  const team = deps.store.getTeam(delivery.team_id);
+  const leader = team?.members.find((item) => item.role === 'leader');
+  if (!leader || leader.member_id === member.member_id) return undefined;
+
+  return deps.store.createMemberOutboundRoute({
+    team_id: delivery.team_id,
+    run_id: delivery.run_id,
+    from_member_id: member.member_id,
+    leader_member_id: leader.member_id,
+    message_id: randomUUID(),
+    delivery_id: randomUUID(),
+    kind: outbound.kind,
+    content: outbound.content,
+    now: Date.now(),
+  });
 }
 
 function validateCreateTeam(
@@ -1025,6 +1075,44 @@ function leaderJsonRetryPrompt(previous: string, error: string): string {
     'Previous response to rewrite:',
     previous,
   ].join('\n');
+}
+
+interface ParsedMemberOutbound {
+  kind: Extract<TeamMessageKind, 'result' | 'review' | 'need_info' | 'proposal' | 'error'>;
+  content: string;
+}
+
+function parseMemberOutbound(raw: string): ParsedMemberOutbound {
+  const trimmed = raw.trim();
+  if (!trimmed) return { kind: 'result', content: 'Completed without an explicit result.' };
+
+  const direct = trimmed.match(/^MESSAGE_TO\s+([A-Za-z0-9_-]+)\s*:\s*([\s\S]*)$/i);
+  if (direct) {
+    const target = direct[1].trim();
+    const body = direct[2].trim();
+    return {
+      kind: 'proposal',
+      content: [`Attempted message to ${target}. V1 routed it to leader for approval.`, body].filter(Boolean).join('\n\n'),
+    };
+  }
+
+  const tagged = trimmed.match(/^(RESULT|REVIEW|NEED_INFO|PROPOSAL|FAILED)\s*:\s*([\s\S]*)$/i);
+  if (!tagged) return { kind: 'result', content: trimmed };
+
+  const content = tagged[2].trim() || 'No details provided.';
+  switch (tagged[1].toUpperCase()) {
+    case 'REVIEW':
+      return { kind: 'review', content };
+    case 'NEED_INFO':
+      return { kind: 'need_info', content };
+    case 'PROPOSAL':
+      return { kind: 'proposal', content };
+    case 'FAILED':
+      return { kind: 'error', content };
+    case 'RESULT':
+    default:
+      return { kind: 'result', content };
+  }
 }
 
 interface ValidatedPlanAssignment {
@@ -1303,7 +1391,8 @@ function deliveryPrompt({
     '',
     'Expected output:',
     '- Complete the assigned task in this existing team session.',
-    '- Report a concise result, blocker, or failure for the leader.',
+    '- Report one concise outbound message for the leader.',
+    '- Start with exactly one of: RESULT:, REVIEW:, NEED_INFO:, PROPOSAL:, FAILED:, or MESSAGE_TO role:.',
   ].join('\n');
 }
 
