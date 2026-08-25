@@ -1216,7 +1216,7 @@ button {
 
 .team-chat-body {
   display: grid;
-  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(200px, var(--team-roster-width, 28%)) 6px minmax(0, 1fr);
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -1230,8 +1230,31 @@ button {
   min-height: 0;
   padding: 16px;
   overflow-y: auto;
-  border-right: 1px solid var(--border);
   background: var(--bg-sidebar);
+}
+
+.team-resizer {
+  position: relative;
+  min-width: 6px;
+  min-height: 0;
+  cursor: col-resize;
+  touch-action: none;
+  background: var(--border);
+}
+
+.team-resizer::before {
+  position: absolute;
+  inset: 0 2px;
+  content: '';
+  background: var(--border-strong);
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.team-resizer:hover::before,
+.team-resizer:focus-visible::before {
+  opacity: 1;
+  background: var(--accent);
 }
 
 .team-run-panel {
@@ -1257,10 +1280,14 @@ button {
 
 .team-run-content {
   display: grid;
-  grid-template-columns: minmax(260px, 0.42fr) minmax(0, 0.58fr);
+  grid-template-columns: minmax(240px, var(--team-activity-width, 42%)) 6px minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+.team-run-content > .conversation-empty {
+  grid-column: 1 / -1;
 }
 
 .team-activity-stream,
@@ -1269,10 +1296,6 @@ button {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-}
-
-.team-activity-stream {
-  border-right: 1px solid var(--border);
 }
 
 .team-section-title {
@@ -1352,6 +1375,15 @@ button {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.team-run-event-markdown {
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.team-run-event-markdown :is(h1, h2, h3, h4, h5, h6) {
+  font-size: 0.95rem;
 }
 
 .team-run-event-meta {
@@ -1488,9 +1520,12 @@ button {
     overflow-y: auto;
   }
 
+  .team-resizer {
+    display: none;
+  }
+
   .team-roster {
     max-height: 260px;
-    border-right: 0;
     border-bottom: 1px solid var(--border);
   }
 

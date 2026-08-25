@@ -69,6 +69,10 @@ function deliveryActivityText(status: string): string {
   return status;
 }
 
+function teamMessageDisplayLabel(kind: string): string {
+  return teamMessageTimelineMeta(kind)?.label ?? (kind === 'final' ? 'Final result' : kind);
+}
+
 function deliveryActivityTime(delivery: TeamRunWithItems['deliveries'][number]): number {
   if (delivery.status === 'running') return delivery.started_at ?? delivery.created_at;
   if (delivery.status === 'done' || delivery.status === 'failed' || delivery.status === 'cancelled') {
@@ -77,9 +81,79 @@ function deliveryActivityTime(delivery: TeamRunWithItems['deliveries'][number]):
   return delivery.created_at;
 }
 
+function sourceDeliveryForMessage(
+  message: TeamRunWithItems['messages'][number],
+  deliveries: TeamRunWithItems['deliveries'],
+): TeamRunWithItems['deliveries'][number] | undefined {
+  if (message.from_kind !== 'member' || !message.from_member_id) return undefined;
+  if (!['result', 'review', 'need_info', 'proposal', 'final', 'error'].includes(message.kind)) return undefined;
+  return deliveries
+    .filter((delivery) =>
+      delivery.to_member_id === message.from_member_id &&
+      delivery.message_id !== message.message_id &&
+      delivery.created_at <= message.create_time,
+    )
+    .sort((a, b) => deliveryActivityTime(b) - deliveryActivityTime(a))[0];
+}
+
+function deliveryTranscriptText(
+  run: TeamRunWithItems,
+  delivery: TeamRunWithItems['deliveries'][number],
+  sourceDeliveryByMessageId: Map<string, string>,
+): string {
+  const inputMessage = run.messages.find((message) => message.message_id === delivery.message_id);
+  const outputMessages = run.messages.filter((message) => sourceDeliveryByMessageId.get(message.message_id) === delivery.delivery_id);
+  const parts: string[] = [];
+
+  if (inputMessage) {
+    parts.push(`${teamMessageDisplayLabel(inputMessage.kind)}:\n${inputMessage.content}`);
+  }
+  for (const message of outputMessages) {
+    parts.push(`${teamMessageDisplayLabel(message.kind)}:\n${message.content}`);
+  }
+
+  if (parts.length > 0) return parts.join('\n\n');
+  return delivery.status === 'done' ? 'Completed.' : '';
+}
+
+function appendDeliveryOutput(existingText: string, label: string, content: string): string {
+  const trimmedContent = content.trim();
+  if (!trimmedContent || existingText.includes(trimmedContent)) return existingText;
+  const block = `${label}:\n${trimmedContent}`;
+  if (!existingText.trim() || existingText.trim() === 'Completed.') return block;
+  return `${existingText.trimEnd()}\n\n${block}`;
+}
+
+function deliveryLiveInputText(label: string, content: string): string {
+  return `${label}:\n${content.trim()}\n\nStream:\n`;
+}
+
+function latestDeliveryStreamForMessage(
+  items: TeamTimelineItem[],
+  message: { from_kind: string; from_member_id: string | null; create_time: number },
+  excludedDeliveryId?: string | null,
+): TeamTimelineItem | undefined {
+  if (message.from_kind !== 'member' || !message.from_member_id) return undefined;
+  return items
+    .filter(
+      (item) =>
+        item.kind === 'delivery_stream' &&
+        item.member_id === message.from_member_id &&
+        item.delivery_id !== excludedDeliveryId &&
+        item.create_time <= message.create_time,
+    )
+    .sort((a, b) => b.create_time - a.create_time)[0];
+}
+
 function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
   const items: TeamTimelineItem[] = [];
   for (const run of runs) {
+    const sourceDeliveryByMessageId = new Map<string, string>();
+    for (const message of run.messages) {
+      const sourceDelivery = sourceDeliveryForMessage(message, run.deliveries);
+      if (sourceDelivery) sourceDeliveryByMessageId.set(message.message_id, sourceDelivery.delivery_id);
+    }
+
     for (const message of run.messages) {
       if (message.kind === 'user_request') {
         items.push({
@@ -138,6 +212,7 @@ function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
         const meta = teamMessageTimelineMeta(message.kind);
         if (meta) {
           const delivery = run.deliveries.find((item) => item.message_id === message.message_id);
+          const sourceDeliveryId = sourceDeliveryByMessageId.get(message.message_id);
           items.push({
             item_id: `message:${message.message_id}`,
             run_id: run.run.run_id,
@@ -146,7 +221,7 @@ function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
             text: message.content,
             status: delivery?.status,
             member_id: message.from_member_id ?? delivery?.to_member_id,
-            delivery_id: delivery?.delivery_id,
+            delivery_id: sourceDeliveryId ?? delivery?.delivery_id,
             create_time: message.create_time,
           });
         }
@@ -159,7 +234,7 @@ function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
         run_id: run.run.run_id,
         kind: 'delivery_stream',
         label: deliveryStreamLabel(delivery.message_id, run.run.root_user_message_id),
-        text: delivery.status === 'done' ? 'Completed.' : '',
+        text: deliveryTranscriptText(run, delivery, sourceDeliveryByMessageId),
         status: delivery.status,
         member_id: delivery.to_member_id,
         delivery_id: delivery.delivery_id,
@@ -412,7 +487,7 @@ export function App() {
                   run_id: event.run.run_id,
                   kind: 'delivery_stream',
                   label: 'Leader response',
-                  text: '',
+                  text: deliveryLiveInputText('User request', event.user_message.content),
                   status: event.delivery.status,
                   member_id: event.delivery.to_member_id,
                   delivery_id: event.delivery.delivery_id,
@@ -508,9 +583,8 @@ export function App() {
           });
           break;
         case 'team_run_completed':
-          setTeamTimeline((prev) => ({
-            ...prev,
-            [event.team_id]: putTimelineItem(prev[event.team_id] ?? [], {
+          setTeamTimeline((prev) => {
+            let items = putTimelineItem(prev[event.team_id] ?? [], {
               item_id: `message:${event.final_message.message_id}`,
               run_id: event.run.run_id,
               kind: 'final',
@@ -518,8 +592,16 @@ export function App() {
               text: event.final_message.content,
               status: event.run.status,
               create_time: event.final_message.create_time,
-            }),
-          }));
+            });
+            const sourceStream = latestDeliveryStreamForMessage(items, event.final_message);
+            if (sourceStream) {
+              items = putTimelineItem(items, {
+                ...sourceStream,
+                text: appendDeliveryOutput(sourceStream.text, 'Final result', event.final_message.content),
+              });
+            }
+            return { ...prev, [event.team_id]: items.sort((a, b) => a.create_time - b.create_time) };
+          });
           setSendingTeamRequest((prev) => ({ ...prev, [event.team_id]: false }));
           void listTeams().then(setTeams);
           break;
@@ -559,6 +641,13 @@ export function App() {
               member_id: event.question_message.from_member_id,
               create_time: event.question_message.create_time,
             });
+            const sourceStream = latestDeliveryStreamForMessage(items, event.question_message, event.delivery.delivery_id);
+            if (sourceStream) {
+              items = putTimelineItem(items, {
+                ...sourceStream,
+                text: appendDeliveryOutput(sourceStream.text, 'Need info', event.question_message.content),
+              });
+            }
             return { ...prev, [event.team_id]: items.sort((a, b) => a.create_time - b.create_time) };
           });
           setSendingTeamRequest((prev) => ({ ...prev, [event.team_id]: false }));
@@ -580,7 +669,7 @@ export function App() {
               run_id: event.run.run_id,
               kind: 'delivery_stream',
               label: 'Leader follow-up',
-              text: '',
+              text: deliveryLiveInputText('User reply', event.user_message.content),
               status: event.delivery.status,
               member_id: event.delivery.to_member_id,
               delivery_id: event.delivery.delivery_id,
@@ -627,12 +716,13 @@ export function App() {
               });
             }
             for (const delivery of event.deliveries) {
+              const sourceMessage = event.assignment_messages.find((message) => message.message_id === delivery.message_id);
               items = putTimelineItem(items, {
                 item_id: `delivery:${delivery.delivery_id}:stream`,
                 run_id: event.run.run_id,
                 kind: 'delivery_stream',
                 label: 'Delivery',
-                text: '',
+                text: sourceMessage ? deliveryLiveInputText('Assignment', sourceMessage.content) : '',
                 status: delivery.status,
                 member_id: delivery.to_member_id,
                 delivery_id: delivery.delivery_id,
@@ -660,6 +750,7 @@ export function App() {
             let items = prev[event.team_id] ?? [];
             const meta = teamMessageTimelineMeta(event.message.kind);
             if (meta || event.message.kind === 'error') {
+              const sourceStream = latestDeliveryStreamForMessage(items, event.message, event.delivery?.delivery_id);
               items = putTimelineItem(items, {
                 item_id: `message:${event.message.message_id}`,
                 run_id: event.message.run_id,
@@ -668,9 +759,15 @@ export function App() {
                 text: event.message.content,
                 status: event.delivery?.status,
                 member_id: event.message.from_member_id ?? event.delivery?.to_member_id,
-                delivery_id: event.delivery?.delivery_id,
+                delivery_id: sourceStream?.delivery_id ?? event.delivery?.delivery_id,
                 create_time: event.message.create_time,
               });
+              if (sourceStream) {
+                items = putTimelineItem(items, {
+                  ...sourceStream,
+                  text: appendDeliveryOutput(sourceStream.text, meta?.label ?? 'Member error', event.message.content),
+                });
+              }
             }
             if (event.delivery) {
               items = putTimelineItem(items, {
@@ -678,7 +775,7 @@ export function App() {
                 run_id: event.delivery.run_id,
                 kind: 'delivery_stream',
                 label: 'Leader follow-up',
-                text: '',
+                text: deliveryLiveInputText(teamMessageDisplayLabel(event.message.kind), event.message.content),
                 status: event.delivery.status,
                 member_id: event.delivery.to_member_id,
                 delivery_id: event.delivery.delivery_id,

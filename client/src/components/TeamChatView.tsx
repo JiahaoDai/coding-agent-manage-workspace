@@ -1,4 +1,7 @@
-import { useEffect, useRef, type FormEvent, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import ReactMarkdown from 'react-markdown';
+import rehypeHighlight from 'rehype-highlight';
+import remarkGfm from 'remark-gfm';
 import type { TeamPermissionContext, TeamWithMembers } from '../types';
 
 export interface TeamTimelineItem {
@@ -48,6 +51,10 @@ export function TeamChatView({
   onSubmit: (text: string) => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const runContentRef = useRef<HTMLDivElement>(null);
+  const [rosterWidth, setRosterWidth] = useState(28);
+  const [activityWidth, setActivityWidth] = useState(42);
   const teamRunning = team?.status === 'running';
   const teamWaitingUser = team?.status === 'waiting_user';
   const canSubmit = draft.trim() !== '' && team !== null && !loading && !sending && !teamRunning;
@@ -71,6 +78,22 @@ export function TeamChatView({
       event.preventDefault();
       submit();
     }
+  }
+
+  function handleBodyDividerPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    startHorizontalResize(event, bodyRef.current, 18, 48, setRosterWidth);
+  }
+
+  function handleRunDividerPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    startHorizontalResize(event, runContentRef.current, 25, 70, setActivityWidth);
+  }
+
+  function handleBodyDividerKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    handleDividerKeyDown(event, rosterWidth, 18, 48, setRosterWidth);
+  }
+
+  function handleRunDividerKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    handleDividerKeyDown(event, activityWidth, 25, 70, setActivityWidth);
   }
 
   if (loading) {
@@ -121,7 +144,11 @@ export function TeamChatView({
         </p>
       )}
 
-      <div className="team-chat-body">
+      <div
+        className="team-chat-body"
+        ref={bodyRef}
+        style={{ '--team-roster-width': `${rosterWidth}%` } as CSSProperties}
+      >
         <aside className="team-roster" aria-label="Team members">
           {team.members.map((member) => (
             <article
@@ -159,11 +186,29 @@ export function TeamChatView({
           ))}
         </aside>
 
+        <div
+          className="team-resizer"
+          role="separator"
+          aria-label="Resize team roster"
+          aria-orientation="vertical"
+          aria-valuemin={18}
+          aria-valuemax={48}
+          aria-valuenow={Math.round(rosterWidth)}
+          tabIndex={0}
+          onKeyDown={handleBodyDividerKeyDown}
+          onPointerDown={handleBodyDividerPointerDown}
+        />
+
         <div className="team-run-panel" aria-label="Team run timeline">
           <div className="team-run-header">
             <h3>Run activity</h3>
           </div>
-          <div className="team-run-content" aria-live="polite">
+          <div
+            className="team-run-content"
+            ref={runContentRef}
+            style={{ '--team-activity-width': `${activityWidth}%` } as CSSProperties}
+            aria-live="polite"
+          >
             {items.length === 0 ? (
               <p className="conversation-empty">No team runs yet.</p>
             ) : (
@@ -182,7 +227,7 @@ export function TeamChatView({
                             {new Date(item.create_time).toLocaleTimeString()}
                           </time>
                         </div>
-                        <p>{decorateActivityText(item, memberById.get(item.member_id ?? '')?.role)}</p>
+                        <ActivityText item={item} memberRole={memberById.get(item.member_id ?? '')?.role} />
                         <div className="team-run-event-meta">
                           {item.status && <span className="team-run-event-status">{item.status}</span>}
                           {item.delivery_id && <span className="team-run-event-status">delivery {shortId(item.delivery_id)}</span>}
@@ -192,6 +237,19 @@ export function TeamChatView({
                     ))}
                   </div>
                 </section>
+
+                <div
+                  className="team-resizer"
+                  role="separator"
+                  aria-label="Resize delivery streams"
+                  aria-orientation="vertical"
+                  aria-valuemin={25}
+                  aria-valuemax={70}
+                  aria-valuenow={Math.round(activityWidth)}
+                  tabIndex={0}
+                  onKeyDown={handleRunDividerKeyDown}
+                  onPointerDown={handleRunDividerPointerDown}
+                />
 
                 <section className="team-delivery-streams" aria-label="Delivery streams">
                   <div className="team-section-title">
@@ -290,6 +348,68 @@ export function TeamChatView({
         </div>
       </form>
     </section>
+  );
+}
+
+function startHorizontalResize(
+  event: ReactPointerEvent<HTMLDivElement>,
+  container: HTMLDivElement | null,
+  minPercent: number,
+  maxPercent: number,
+  onResize: (value: number) => void,
+) {
+  if (!container) return;
+  event.preventDefault();
+
+  const update = (clientX: number) => {
+    const rect = container.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    onResize(clamp(((clientX - rect.left) / rect.width) * 100, minPercent, maxPercent));
+  };
+  const handlePointerMove = (pointerEvent: PointerEvent) => update(pointerEvent.clientX);
+  const handlePointerUp = () => {
+    window.removeEventListener('pointermove', handlePointerMove);
+    window.removeEventListener('pointerup', handlePointerUp);
+  };
+
+  update(event.clientX);
+  window.addEventListener('pointermove', handlePointerMove);
+  window.addEventListener('pointerup', handlePointerUp, { once: true });
+}
+
+function handleDividerKeyDown(
+  event: KeyboardEvent<HTMLDivElement>,
+  value: number,
+  minPercent: number,
+  maxPercent: number,
+  onResize: (value: number) => void,
+) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  if (event.key === 'Home') {
+    onResize(minPercent);
+  } else if (event.key === 'End') {
+    onResize(maxPercent);
+  } else {
+    onResize(clamp(value + (event.key === 'ArrowRight' ? 3 : -3), minPercent, maxPercent));
+  }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function ActivityText({ item, memberRole }: { item: TeamTimelineItem; memberRole: string | undefined }) {
+  const text = decorateActivityText(item, memberRole);
+  if (item.kind === 'delivery_activity' || item.kind === 'user_request') {
+    return <p>{text}</p>;
+  }
+  return (
+    <div className="assistant-text team-run-event-markdown">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+        {text}
+      </ReactMarkdown>
+    </div>
   );
 }
 

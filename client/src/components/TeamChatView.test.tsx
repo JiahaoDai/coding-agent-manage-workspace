@@ -77,6 +77,7 @@ describe('TeamChatView', () => {
     expect(markup).toContain('session-1');
     expect(markup).toContain('Active delivery delivery');
     expect(markup).toContain('Run activity');
+    expect(markup).toContain('Resize team roster');
     expect(markup).toContain('No team runs yet.');
     expect(markup).toContain('Send team request');
   });
@@ -157,7 +158,7 @@ describe('TeamChatView', () => {
             run_id: 'run-1',
             kind: 'final',
             label: 'Final result',
-            text: 'Settings page is ready.',
+            text: '## Settings page\n\n- ready\n\n```ts\nconst ready = true;\n```',
             status: 'completed',
             create_time: 6,
           },
@@ -191,6 +192,7 @@ describe('TeamChatView', () => {
     expect(markup).toContain('Build the settings page.');
     expect(markup).toContain('Activity');
     expect(markup).toContain('Delivery streams');
+    expect(markup).toContain('Resize delivery streams');
     expect(markup).toContain('has-permission-request');
     expect(markup).toContain('Permission pending');
     expect(markup).toContain('permission pending');
@@ -207,7 +209,9 @@ describe('TeamChatView', () => {
     expect(markup).toContain('REVIEW: Missing an assertion.');
     expect(markup).toContain('attempt attempt-');
     expect(markup).toContain('Final result');
-    expect(markup).toContain('Settings page is ready.');
+    expect(markup).toContain('<h2>Settings page</h2>');
+    expect(markup).toContain('<li>ready</li>');
+    expect(markup).toContain('class="hljs');
     expect(markup).toContain('completed');
     expect(markup).toContain('Plan');
     expect(markup).toContain('Implement API work, then review it.');
