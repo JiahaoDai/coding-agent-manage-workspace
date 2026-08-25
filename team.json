@@ -1,0 +1,16 @@
+{
+    "team_id": "xxx",
+    "name": "",
+    "members": [
+        {
+            "role": "",
+            "role_prompt": "角色人设",
+            "coding-agent": "pi claudecode opencode",
+            "session_id": "real agent session id",
+            "model": "gpt-5.5",
+            "status": "'idle' | 'running' | 'waiting_permission' | 'error'"
+        }
+    ],
+    "status": "team 运行状态 'idle' | 'running' | 'error' | 'archived'",
+    "max_parallel_members": "最大可并发执行的member数量"
+}
