@@ -1,0 +1,24 @@
+{
+  "team_id": "归属于那个team",
+  "message_id": "",
+  "from": "",
+  "to": "",
+  "content": "",
+  "kind": "消息类型",
+  "run_id": "直接记录user发送的消息轮次",
+  "seq_id": "发送给同一个agent的多条消息的先后顺序",
+  "dependencies": [
+    {
+        "message_id": "前置message_id",
+        "dependency_type": "'success' | 'finished' 前置message完成的状态"
+    }
+  ],
+  "status": "消息状态： pending running done. 'blocked' | 'pending' | 'running' | 'done' | 'failed' | 'cancelled'",
+  "error": "记录错误信息",
+  "result": "记录处理这条消息的结果",
+  "can_retry": "false 能否重试",
+  "max_retry_time": "最大重试次数",
+  "created_time": "任务创建时间",
+  "started_at": "任务启动时间",
+  "finished_at": "结束时间"
+}

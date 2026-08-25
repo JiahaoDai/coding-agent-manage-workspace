@@ -1,0 +1,41 @@
+{
+  "name": "coding-agent-dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local single-user interface to manage multiple coding agents (Claude Code, OpenCode, Pi).",
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:client": "vite",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.235",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@hono/node-server": "^2.1.1",
+    "@opencode-ai/sdk": "^1.18.18",
+    "better-sqlite3": "^13.0.3",
+    "hono": "^4.13.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "concurrently": "^10.0.5",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
+  }
+}
