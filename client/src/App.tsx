@@ -128,6 +128,55 @@ function deliveryLiveInputText(label: string, content: string): string {
   return `${label}:\n${content.trim()}\n\nStream:\n`;
 }
 
+type TeamTextDeltaEvent = Extract<ServerEvent, { type: 'team_text_delta' }>;
+
+export function appendTeamStreamDelta(existingText: string, event: TeamTextDeltaEvent): string {
+  const legacy = parseLegacyTeamProcessLine(event.text);
+  const streamKind = event.stream_kind ?? legacy?.streamKind ?? 'text';
+  const streamLabel = event.stream_label ?? legacy?.streamLabel ?? streamKind;
+  const text = event.stream_kind ? event.text : (legacy?.text ?? event.text);
+
+  if (streamKind === 'thinking') return appendThinkingDelta(existingText, text);
+  if (streamKind === 'tool' || streamKind === 'status') return appendProcessLine(existingText, streamLabel, text);
+  return appendRawTeamTextDelta(existingText, text);
+}
+
+function appendRawTeamTextDelta(existingText: string, text: string): string {
+  const separator = hasOpenThinkingLine(existingText) ? '\n\n' : '';
+  return `${existingText}${separator}${text}`;
+}
+
+function appendThinkingDelta(existingText: string, text: string): string {
+  if (hasOpenThinkingLine(existingText)) return `${existingText}${text}`;
+  const prefix = existingText && !existingText.endsWith('\n') ? '\n' : '';
+  return `${existingText}${prefix}[thinking] ${text}`;
+}
+
+function appendProcessLine(existingText: string, label: string, text: string): string {
+  const prefix = existingText && !existingText.endsWith('\n') ? '\n' : '';
+  return `${existingText}${prefix}[${label}] ${text.trimEnd()}\n`;
+}
+
+function hasOpenThinkingLine(text: string): boolean {
+  const marker = '[thinking] ';
+  const start = text.lastIndexOf(marker);
+  if (start === -1) return false;
+  return !text.slice(start + marker.length).includes('\n');
+}
+
+function parseLegacyTeamProcessLine(text: string):
+  | { streamKind: 'thinking' | 'tool' | 'status'; streamLabel: string; text: string }
+  | null {
+  const match = text.match(/^\n?\[(thinking|status|tool start|tool end)\] ([\s\S]*?)\n?$/);
+  if (!match) return null;
+  const streamLabel = match[1];
+  return {
+    streamKind: streamLabel === 'thinking' ? 'thinking' : streamLabel === 'status' ? 'status' : 'tool',
+    streamLabel,
+    text: match[2],
+  };
+}
+
 function latestDeliveryStreamForMessage(
   items: TeamTimelineItem[],
   message: { from_kind: string; from_member_id: string | null; create_time: number },
@@ -573,7 +622,7 @@ export function App() {
                 run_id: event.run_id,
                 kind: 'delivery_stream',
                 label: existing?.label ?? 'Leader response',
-                text: `${existing?.text ?? ''}${event.text}`,
+                text: appendTeamStreamDelta(existing?.text ?? '', event),
                 status: existing?.status ?? 'running',
                 member_id: event.member_id,
                 delivery_id: event.delivery_id,

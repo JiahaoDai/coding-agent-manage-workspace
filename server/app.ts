@@ -571,7 +571,7 @@ async function runLeaderOnlyDelivery({
   team_members: TeamWithMembers['members'];
 }): Promise<void> {
   const output: string[] = [];
-  const broadcastLeaderText = (text: string) =>
+  const broadcastLeaderText = (text: string, stream_kind: 'text' | 'thinking' | 'tool' | 'status' = 'text', stream_label?: string) =>
     deps.sse.broadcast({
       type: 'team_text_delta',
       team_id,
@@ -579,6 +579,8 @@ async function runLeaderOnlyDelivery({
       delivery_id,
       member_id: leader.member_id,
       text,
+      stream_kind,
+      stream_label,
     });
 
   deps.store.updateTeamDeliveryStatus(delivery_id, 'running');
@@ -600,16 +602,16 @@ async function runLeaderOnlyDelivery({
       broadcastLeaderText(delta);
     },
     onToolCallStart: (tool_call_id, name, input) => {
-      broadcastLeaderText(teamProcessLine('tool start', `${name} ${tool_call_id} ${formatTeamToolInput(input)}`));
+      broadcastLeaderText(`${name} ${tool_call_id} ${formatTeamToolInput(input)}`, 'tool', 'tool start');
     },
     onToolCallEnd: (tool_call_id) => {
-      broadcastLeaderText(teamProcessLine('tool end', tool_call_id));
+      broadcastLeaderText(tool_call_id, 'tool', 'tool end');
     },
     onThinkingDelta: (delta) => {
-      broadcastLeaderText(teamProcessLine('thinking', delta));
+      broadcastLeaderText(delta, 'thinking');
     },
     onStatusNote: (note) => {
-      broadcastLeaderText(teamProcessLine('status', note));
+      broadcastLeaderText(note, 'status', 'status');
     },
     onStatusChange: (status) => {
       const current = deps.store.get(session.session_id);
@@ -990,7 +992,7 @@ async function runClaimedLeaderFollowUpDelivery({
 
   const output: string[] = [];
   const team = deps.store.getTeam(delivery.team_id);
-  const broadcastLeaderText = (text: string) =>
+  const broadcastLeaderText = (text: string, stream_kind: 'text' | 'thinking' | 'tool' | 'status' = 'text', stream_label?: string) =>
     deps.sse.broadcast({
       type: 'team_text_delta',
       team_id: delivery.team_id,
@@ -998,6 +1000,8 @@ async function runClaimedLeaderFollowUpDelivery({
       delivery_id: delivery.delivery_id,
       member_id: leader.member_id,
       text,
+      stream_kind,
+      stream_label,
     });
 
   deps.store.updateStatus(session.session_id, 'running');
@@ -1009,16 +1013,16 @@ async function runClaimedLeaderFollowUpDelivery({
       broadcastLeaderText(delta);
     },
     onToolCallStart: (tool_call_id, name, input) => {
-      broadcastLeaderText(teamProcessLine('tool start', `${name} ${tool_call_id} ${formatTeamToolInput(input)}`));
+      broadcastLeaderText(`${name} ${tool_call_id} ${formatTeamToolInput(input)}`, 'tool', 'tool start');
     },
     onToolCallEnd: (tool_call_id) => {
-      broadcastLeaderText(teamProcessLine('tool end', tool_call_id));
+      broadcastLeaderText(tool_call_id, 'tool', 'tool end');
     },
     onThinkingDelta: (delta) => {
-      broadcastLeaderText(teamProcessLine('thinking', delta));
+      broadcastLeaderText(delta, 'thinking');
     },
     onStatusNote: (note) => {
-      broadcastLeaderText(teamProcessLine('status', note));
+      broadcastLeaderText(note, 'status', 'status');
     },
     onStatusChange: (status) => {
       const current = deps.store.get(session.session_id);
@@ -1242,6 +1246,7 @@ async function runClaimedTeamDelivery({
         delivery_id: delivery.delivery_id,
         member_id: member.member_id,
         text: delta,
+        stream_kind: 'text',
       });
     },
     onToolCallStart: (tool_call_id, name, input) => {
@@ -1251,7 +1256,9 @@ async function runClaimedTeamDelivery({
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
         member_id: member.member_id,
-        text: teamProcessLine('tool start', `${name} ${tool_call_id} ${formatTeamToolInput(input)}`),
+        text: `${name} ${tool_call_id} ${formatTeamToolInput(input)}`,
+        stream_kind: 'tool',
+        stream_label: 'tool start',
       });
     },
     onToolCallEnd: (tool_call_id) => {
@@ -1261,7 +1268,9 @@ async function runClaimedTeamDelivery({
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
         member_id: member.member_id,
-        text: teamProcessLine('tool end', tool_call_id),
+        text: tool_call_id,
+        stream_kind: 'tool',
+        stream_label: 'tool end',
       });
     },
     onThinkingDelta: (delta) => {
@@ -1271,7 +1280,8 @@ async function runClaimedTeamDelivery({
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
         member_id: member.member_id,
-        text: teamProcessLine('thinking', delta),
+        text: delta,
+        stream_kind: 'thinking',
       });
     },
     onStatusNote: (note) => {
@@ -1282,7 +1292,9 @@ async function runClaimedTeamDelivery({
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
         member_id: member.member_id,
-        text: teamProcessLine('status', note),
+        text: note,
+        stream_kind: 'status',
+        stream_label: 'status',
       });
     },
     onStatusChange: (status) => {
@@ -1437,10 +1449,6 @@ function memberInitializationPrompt(member: TeamMemberInput): string {
     '- PROPOSAL: ...',
     '- FAILED: ...',
   ].join('\n');
-}
-
-function teamProcessLine(label: string, text: string): string {
-  return `\n[${label}] ${text}\n`;
 }
 
 function formatTeamToolInput(input: unknown): string {

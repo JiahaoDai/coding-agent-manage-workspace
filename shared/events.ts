@@ -20,6 +20,8 @@ export interface TeamPermissionContext {
   cwd: string;
 }
 
+export type TeamStreamKind = 'text' | 'thinking' | 'tool' | 'status';
+
 /**
  * Events streamed downstream (server → client) over the single multiplexed SSE
  * stream. Every event carries a `session_id` (except a session-less `error`)
@@ -62,6 +64,8 @@ export type ServerEvent =
       delivery_id: string;
       member_id: string;
       text: string;
+      stream_kind: TeamStreamKind;
+      stream_label?: string;
     }
   | {
       type: 'team_run_completed';

@@ -664,10 +664,11 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
       expect(created!.user_message.content).toBe('Build the settings page.');
       expect(created!.delivery.to_member_id).toBe(team.members[0].member_id);
 
-      const streamed = events
-        .filter((event): event is Extract<ServerEvent, { type: 'team_text_delta' }> => event.type === 'team_text_delta')
-        .map((event) => event.text)
-        .join('');
+      const streamedEvents = events.filter(
+        (event): event is Extract<ServerEvent, { type: 'team_text_delta' }> => event.type === 'team_text_delta',
+      );
+      expect(streamedEvents.every((event) => event.stream_kind === 'text')).toBe(true);
+      const streamed = streamedEvents.map((event) => event.text).join('');
       expect(streamed).toBe('{"type":"final","summary":"done","result":"Leader handled the request."}');
 
       const completed = events.find(
