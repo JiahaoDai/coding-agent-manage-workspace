@@ -255,6 +255,9 @@ describe('TeamChatView', () => {
     );
 
     expect(markup).toContain('waiting_user');
+    expect(markup).toContain('team-status-waiting_user');
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain('The team is waiting for your answer');
     expect(markup).toContain('Which storage should the team use?');
     expect(markup).toContain('Answer the leader...');
   });

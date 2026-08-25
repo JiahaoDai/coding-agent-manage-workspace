@@ -124,6 +124,9 @@ export function TeamChatView({
   const activityItems = items
     .filter((item) => item.kind !== 'delivery_stream')
     .sort((a, b) => a.create_time - b.create_time);
+  const latestNeedInfo = activityItems
+    .filter((item) => item.kind === 'need_info')
+    .sort((a, b) => b.create_time - a.create_time)[0];
 
   return (
     <section className="team-chat" aria-labelledby="team-chat-title">
@@ -135,7 +138,7 @@ export function TeamChatView({
             {team.cwd}
           </p>
         </div>
-        <span className="team-status">{team.status}</span>
+        <span className={`team-status team-status-${team.status}`}>{team.status}</span>
       </header>
 
       {deleteError && (
@@ -311,6 +314,20 @@ export function TeamChatView({
           </div>
         </div>
       </div>
+
+      {teamWaitingUser && (
+        <section className="team-waiting-user-banner" role="alert" aria-live="assertive">
+          <div className="team-waiting-user-head">
+            <span>Need info</span>
+            <strong>The team is waiting for your answer</strong>
+          </div>
+          {latestNeedInfo ? (
+            <ActivityText item={latestNeedInfo} memberRole={memberById.get(latestNeedInfo.member_id ?? '')?.role} />
+          ) : (
+            <p>Answer the leader to continue this run.</p>
+          )}
+        </section>
+      )}
 
       <form className="composer team-composer" onSubmit={submit}>
         <textarea
