@@ -5,17 +5,18 @@ export function TeamList({
   selectedId,
   onSelect,
   onDelete,
+  emptyLabel = 'No teams yet.',
 }: {
   teams: TeamWithMembers[];
   selectedId: string | null;
   onSelect: (teamId: string) => void;
   onDelete: (teamId: string) => void;
+  emptyLabel?: string;
 }) {
-  if (teams.length === 0) return null;
+  if (teams.length === 0) return <p className="session-empty">{emptyLabel}</p>;
 
   return (
     <nav className="team-list" aria-label="Teams">
-      <h3 className="session-group-title">Teams</h3>
       {teams.map((team) => (
         <div
           key={team.team_id}
