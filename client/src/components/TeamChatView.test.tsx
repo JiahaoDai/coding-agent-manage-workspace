@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { ConversationView } from './ConversationView';
+import { PermissionModal } from './PermissionModal';
 import { TeamChatView } from './TeamChatView';
 import type { SessionRecord, TeamWithMembers } from '../types';
 
@@ -85,6 +86,17 @@ describe('TeamChatView', () => {
       <TeamChatView
         team={team}
         draft=""
+        pendingPermission={{
+          team_id: 'team-1',
+          team_name: 'Product Builder',
+          run_id: 'run-1',
+          member_id: 'member-2',
+          member_role: 'reviewer',
+          member_agent: 'fake',
+          delivery_id: 'delivery-review',
+          session_id: 'session-2',
+          cwd: '/project',
+        }}
         items={[
           {
             item_id: 'message-1',
@@ -179,6 +191,9 @@ describe('TeamChatView', () => {
     expect(markup).toContain('Build the settings page.');
     expect(markup).toContain('Activity');
     expect(markup).toContain('Delivery streams');
+    expect(markup).toContain('has-permission-request');
+    expect(markup).toContain('Permission pending');
+    expect(markup).toContain('permission pending');
     expect(markup).toContain('leader: Queued.');
     expect(markup).toContain('reviewer: Running.');
     expect(markup).toContain('Leader response');
@@ -219,5 +234,64 @@ describe('TeamChatView', () => {
     expect(markup).toContain('Ordinary session');
     expect(markup).toContain('Send a message to start the conversation.');
     expect(markup).toContain('aria-label="Send"');
+  });
+});
+
+describe('PermissionModal', () => {
+  it('renders ordinary session permission requests without team context', () => {
+    const markup = renderToStaticMarkup(
+      <PermissionModal
+        request={{
+          session_id: 'session-ordinary',
+          request_id: 'perm-1',
+          tool_name: 'Bash',
+          input: { command: 'ls' },
+        }}
+        sessionLabel="Ordinary session · fake"
+        onDecision={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('Ordinary session · fake');
+    expect(markup).toContain('Bash');
+    expect(markup).toContain('&quot;command&quot;: &quot;ls&quot;');
+    expect(markup).not.toContain('Team delivery context');
+  });
+
+  it('renders team, run, member, delivery, session, cwd, tool, and input context', () => {
+    const markup = renderToStaticMarkup(
+      <PermissionModal
+        request={{
+          session_id: 'session-2',
+          request_id: 'perm-team',
+          tool_name: 'Bash',
+          input: { command: 'npm test' },
+          team_context: {
+            team_id: 'team-1',
+            team_name: 'Product Builder',
+            run_id: 'run-1',
+            member_id: 'member-2',
+            member_role: 'reviewer',
+            member_agent: 'fake',
+            delivery_id: 'delivery-review',
+            session_id: 'session-2',
+            cwd: '/project',
+          },
+        }}
+        sessionLabel="reviewer session · fake"
+        onDecision={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('Team delivery context');
+    expect(markup).toContain('Product Builder');
+    expect(markup).toContain('run-1');
+    expect(markup).toContain('reviewer');
+    expect(markup).toContain('fake');
+    expect(markup).toContain('reviewer session · fake · session-2');
+    expect(markup).toContain('delivery-review');
+    expect(markup).toContain('/project');
+    expect(markup).toContain('Bash');
+    expect(markup).toContain('&quot;command&quot;: &quot;npm test&quot;');
   });
 });

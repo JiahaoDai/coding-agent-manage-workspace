@@ -1113,6 +1113,12 @@ button {
   background: var(--bg-surface);
 }
 
+.team-member-card.has-permission-request,
+.team-delivery-card.has-permission-request {
+  border-color: rgba(16, 163, 127, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(16, 163, 127, 0.22);
+}
+
 .team-member-card-head {
   display: flex;
   justify-content: space-between;
@@ -1144,6 +1150,13 @@ button {
 }
 
 .team-member-active {
+  margin: 8px 0 0;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.team-member-permission {
   margin: 8px 0 0;
   color: var(--accent);
   font-size: 0.78rem;
@@ -2102,6 +2115,41 @@ button:focus-visible {
 .permission-session {
   color: var(--text-primary);
   font-weight: 500;
+}
+
+.permission-context {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+}
+
+.permission-context div {
+  min-width: 0;
+}
+
+.permission-context-wide {
+  grid-column: 1 / -1;
+}
+
+.permission-context dt {
+  margin: 0 0 2px;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.permission-context dd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .permission-tool {

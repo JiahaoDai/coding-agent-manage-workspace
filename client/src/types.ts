@@ -1,4 +1,6 @@
 // Re-export the shared contract so client components import from one place.
+import type { TeamPermissionContext } from '../../shared/events';
+
 export type { FsEntry } from '../../shared/fs';
 export type {
   AgentId,
@@ -7,7 +9,7 @@ export type {
   SessionRecord,
   SessionStatus,
 } from '../../shared/session';
-export type { ServerEvent } from '../../shared/events';
+export type { ServerEvent, TeamPermissionContext } from '../../shared/events';
 export type { CapabilityResult, ModelOption } from '../../shared/adapter';
 export type {
   CreateTeamInput,
@@ -27,4 +29,5 @@ export interface PermissionRequest {
   request_id: string;
   tool_name: string;
   input: unknown;
+  team_context?: TeamPermissionContext;
 }

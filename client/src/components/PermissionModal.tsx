@@ -15,6 +15,7 @@ export function PermissionModal({
   sessionLabel: string;
   onDecision: (decision: 'allow' | 'deny') => void;
 }) {
+  const team = request.team_context;
   return (
     <div className="permission-overlay" role="dialog" aria-modal="true" aria-labelledby="permission-title">
       <div className="permission-modal">
@@ -36,10 +37,46 @@ export function PermissionModal({
           <div className="permission-heading">
             <h3 id="permission-title">Permission request</h3>
             <p className="permission-sub">
-              <span className="permission-session">{sessionLabel}</span> wants to run a tool
+              <span className="permission-session">
+                {team ? `${team.team_name} · ${team.member_role}` : sessionLabel}
+              </span>{' '}
+              wants to run a tool
             </p>
           </div>
         </div>
+
+        {team && (
+          <dl className="permission-context" aria-label="Team delivery context">
+            <div>
+              <dt>Team</dt>
+              <dd>{team.team_name}</dd>
+            </div>
+            <div>
+              <dt>Run</dt>
+              <dd>{team.run_id}</dd>
+            </div>
+            <div>
+              <dt>Member</dt>
+              <dd>{team.member_role}</dd>
+            </div>
+            <div>
+              <dt>Agent</dt>
+              <dd>{team.member_agent}</dd>
+            </div>
+            <div>
+              <dt>Session</dt>
+              <dd>{`${sessionLabel} · ${team.session_id}`}</dd>
+            </div>
+            <div>
+              <dt>Delivery</dt>
+              <dd>{team.delivery_id}</dd>
+            </div>
+            <div className="permission-context-wide">
+              <dt>CWD</dt>
+              <dd>{team.cwd}</dd>
+            </div>
+          </dl>
+        )}
 
         <div className="permission-tool">
           <span className="permission-tool-name">{request.tool_name}</span>

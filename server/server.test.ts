@@ -591,6 +591,165 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
       db.close();
     }
   });
+
+  it('scopes permission requests to the owning team delivery and resumes it after a response', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = async (handlers, ctx) => {
+        if (ctx.input.includes('You are ')) {
+          handlers.onStatusChange('completed');
+          return;
+        }
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Run backend permission check.',
+            assignments: [
+              {
+                id: 'backend-check',
+                to: 'backend-coder',
+                task: 'Run the permission-gated check.',
+                context: 'Use the existing permission flow.',
+                depends_on: [],
+              },
+            ],
+          }));
+          handlers.onStatusChange('completed');
+          return;
+        }
+        if (ctx.input.includes('New delivery:')) {
+          const decision = await handlers.onPermissionRequest('team-perm-1', 'Bash', { command: 'ls' });
+          fake.permissionDecisions.push({
+            request_id: 'team-perm-1',
+            tool_name: 'Bash',
+            input: { command: 'ls' },
+            decision,
+          });
+          handlers.onTextDelta(`RESULT: permission was ${decision}`);
+          handlers.onStatusChange('completed');
+          return;
+        }
+        if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Permission flow completed.',
+            result: 'Backend permission check completed.',
+          }));
+          handlers.onStatusChange('completed');
+        }
+      };
+
+      const createdTeam = await post(baseUrl, '/api/teams', {
+        name: 'Permission Team',
+        cwd: '/tmp/team-project',
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Plan permission work.',
+          },
+          {
+            role: 'backend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Run backend checks.',
+          },
+        ],
+      });
+      expect(createdTeam.status).toBe(201);
+      const team = await createdTeam.json() as {
+        team_id: string;
+        members: Array<{ member_id: string; role: string; session_id: string; coding_agent: string }>;
+      };
+      const backend = team.members.find((member) => member.role === 'backend-coder')!;
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Check backend permissions.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const beforePermissionResponse = await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'permission_request'),
+      );
+      const request = beforePermissionResponse.find(
+        (event): event is Extract<ServerEvent, { type: 'permission_request' }> => event.type === 'permission_request',
+      )!;
+      expect(request).toMatchObject({
+        type: 'permission_request',
+        session_id: backend.session_id,
+        request_id: 'team-perm-1',
+        tool_name: 'Bash',
+        input: { command: 'ls' },
+        team_context: {
+          team_id: team.team_id,
+          team_name: 'Permission Team',
+          member_id: backend.member_id,
+          member_role: 'backend-coder',
+          member_agent: 'fake',
+          session_id: backend.session_id,
+          cwd: '/tmp/team-project',
+        },
+      });
+      expect(request.team_context!.run_id).toMatch(/[0-9a-f-]{36}/);
+      expect(request.team_context!.delivery_id).toMatch(/[0-9a-f-]{36}/);
+
+      const pendingTeams = await (await fetch(`${baseUrl}/api/teams`)).json() as Array<{
+        team_id: string;
+        members: Array<{ member_id: string; status: string; current_delivery_id: string | null }>;
+      }>;
+      const pendingBackend = pendingTeams
+        .find((item) => item.team_id === team.team_id)!
+        .members.find((member) => member.member_id === backend.member_id)!;
+      expect(pendingBackend).toMatchObject({
+        status: 'waiting_permission',
+        current_delivery_id: request.team_context!.delivery_id,
+      });
+
+      const response = await post(baseUrl, `/api/sessions/${backend.session_id}/permission`, {
+        request_id: 'team-perm-1',
+        decision: 'allow',
+      });
+      expect(response.status).toBe(200);
+
+      const afterPermissionResponse = await collectEvents(
+        reader,
+        (evs) =>
+          evs.some((event) => event.type === 'permission_response') &&
+          evs.some((event) => event.type === 'team_run_completed'),
+      );
+      const responseEvent = afterPermissionResponse.find(
+        (event): event is Extract<ServerEvent, { type: 'permission_response' }> => event.type === 'permission_response',
+      )!;
+      expect(responseEvent).toMatchObject({
+        session_id: backend.session_id,
+        request_id: 'team-perm-1',
+        decision: 'allow',
+        team_context: request.team_context,
+      });
+
+      expect(fake.permissionDecisions).toEqual([
+        { request_id: 'team-perm-1', tool_name: 'Bash', input: { command: 'ls' }, decision: 'allow' },
+      ]);
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { status: string };
+        deliveries: Array<{ delivery_id: string; status: string }>;
+      }>;
+      expect(runs[0].run.status).toBe('completed');
+      expect(runs[0].deliveries.find((delivery) => delivery.delivery_id === request.team_context!.delivery_id)?.status).toBe('done');
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
 });
 
 describe('agent team leader plan parsing (v3 ticket #4)', () => {

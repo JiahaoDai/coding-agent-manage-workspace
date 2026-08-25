@@ -8,6 +8,18 @@ import type {
   TeamRunRecord,
 } from './team';
 
+export interface TeamPermissionContext {
+  team_id: string;
+  team_name: string;
+  run_id: string;
+  member_id: string;
+  member_role: string;
+  member_agent: string;
+  delivery_id: string;
+  session_id: string;
+  cwd: string;
+}
+
 /**
  * Events streamed downstream (server → client) over the single multiplexed SSE
  * stream. Every event carries a `session_id` (except a session-less `error`)
@@ -21,8 +33,8 @@ export type ServerEvent =
   | { type: 'thinking_delta'; session_id: string; text: string }
   | { type: 'status_note'; session_id: string; text: string }
   | { type: 'status_change'; session_id: string; status: SessionStatus }
-  | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; input: unknown }
-  | { type: 'permission_response'; session_id: string; request_id: string; decision: 'allow' | 'deny' }
+  | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; input: unknown; team_context?: TeamPermissionContext }
+  | { type: 'permission_response'; session_id: string; request_id: string; decision: 'allow' | 'deny'; team_context?: TeamPermissionContext }
   | { type: 'shell_result'; session_id: string; result: ShellCommandResult }
   | { type: 'session_removed'; session_id: string }
   | {

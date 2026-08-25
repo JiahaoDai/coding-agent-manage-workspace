@@ -1,3 +1,5 @@
+import type { TeamPermissionContext } from '../shared/events';
+
 /**
  * Tracks permission requests that are waiting on the user and resolves the
  * promise the adapter is awaiting when a client posts a decision.
@@ -14,7 +16,7 @@ export class PermissionBroker {
    */
   private readonly pending = new Map<
     string,
-    { session_id: string; resolve: (decision: 'allow' | 'deny') => void }
+    { session_id: string; context?: TeamPermissionContext; resolve: (decision: 'allow' | 'deny') => void }
   >();
 
   private static key(session_id: string, request_id: string): string {
@@ -26,9 +28,9 @@ export class PermissionBroker {
    * resolves when the user answers and never rejects; if nobody ever answers,
    * the turn simply stays `running` (cancellation is a later ticket).
    */
-  request(session_id: string, request_id: string): Promise<'allow' | 'deny'> {
+  request(session_id: string, request_id: string, context?: TeamPermissionContext): Promise<'allow' | 'deny'> {
     return new Promise((resolve) => {
-      this.pending.set(PermissionBroker.key(session_id, request_id), { session_id, resolve });
+      this.pending.set(PermissionBroker.key(session_id, request_id), { session_id, context, resolve });
     });
   }
 
@@ -38,12 +40,12 @@ export class PermissionBroker {
    * that asked, so a stale or cross-session answer is rejected. Returns false
    * when there is nothing to resolve.
    */
-  resolve(session_id: string, request_id: string, decision: 'allow' | 'deny'): boolean {
+  resolve(session_id: string, request_id: string, decision: 'allow' | 'deny'): { context?: TeamPermissionContext } | null {
     const entry = this.pending.get(PermissionBroker.key(session_id, request_id));
-    if (!entry) return false;
+    if (!entry) return null;
     this.pending.delete(PermissionBroker.key(session_id, request_id));
     entry.resolve(decision);
-    return true;
+    return { context: entry.context };
   }
 
   /** Number of outstanding requests — used to assert broker state in tests. */

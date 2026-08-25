@@ -7,6 +7,7 @@ import { createFsTree, FsPathError, type FsTree } from './fs/tree';
 import { PermissionBroker } from './permission';
 import type { SseHub } from './sse';
 import type { AgentAdapter, PromptHandlers } from '../shared/adapter';
+import type { TeamPermissionContext } from '../shared/events';
 import type { ResumableSession, SessionRecord } from '../shared/session';
 import type {
   CreateTeamInput,
@@ -497,11 +498,12 @@ export function createApp(deps: AppDeps): Hono {
 
     // Scoped to the session: a request id that is unknown, already answered,
     // or belongs to another session must not resolve this turn.
-    if (!permissions.resolve(session_id, request_id, decision)) {
+    const resolved = permissions.resolve(session_id, request_id, decision);
+    if (!resolved) {
       return c.json({ error: 'unknown or expired permission request' }, 404);
     }
 
-    deps.sse.broadcast({ type: 'permission_response', session_id, request_id, decision });
+    deps.sse.broadcast({ type: 'permission_response', session_id, request_id, decision, team_context: resolved.context });
     return c.json({ ok: true });
   });
 
@@ -590,10 +592,20 @@ async function runLeaderOnlyDelivery({
       deps.store.updateStatus(session.session_id, status);
       deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status });
     },
-    onPermissionRequest: (request_id, tool_name, input) => {
+    onPermissionRequest: async (request_id, tool_name, input) => {
       deps.store.updateTeamMemberStatus(leader.member_id, 'waiting_permission', delivery_id);
-      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input });
-      return permissions.request(session.session_id, request_id);
+      const team_context = teamPermissionContext({
+        team_name,
+        team_id,
+        run_id: run.run_id,
+        member: leader,
+        session,
+        delivery_id,
+      });
+      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input, team_context });
+      const decision = await permissions.request(session.session_id, request_id, team_context);
+      deps.store.updateTeamMemberStatus(leader.member_id, 'running', delivery_id);
+      return decision;
     },
   };
 
@@ -887,6 +899,7 @@ async function runClaimedLeaderFollowUpDelivery({
   }
 
   const output: string[] = [];
+  const team = deps.store.getTeam(delivery.team_id);
   const broadcastLeaderText = (text: string) =>
     deps.sse.broadcast({
       type: 'team_text_delta',
@@ -923,15 +936,24 @@ async function runClaimedLeaderFollowUpDelivery({
       deps.store.updateStatus(session.session_id, status);
       deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status });
     },
-    onPermissionRequest: (request_id, tool_name, input) => {
+    onPermissionRequest: async (request_id, tool_name, input) => {
       deps.store.updateTeamMemberStatus(leader.member_id, 'waiting_permission', delivery.delivery_id);
-      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input });
-      return permissions.request(session.session_id, request_id);
+      const team_context = teamPermissionContext({
+        team_name: team?.name ?? delivery.team_id,
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        member: leader,
+        session,
+        delivery_id: delivery.delivery_id,
+      });
+      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input, team_context });
+      const decision = await permissions.request(session.session_id, request_id, team_context);
+      deps.store.updateTeamMemberStatus(leader.member_id, 'running', delivery.delivery_id);
+      return decision;
     },
   };
 
   try {
-    const team = deps.store.getTeam(delivery.team_id);
     const runItems = deps.store.getTeamRun(delivery.run_id);
     await adapter.prompt(
       session.real_session_id,
@@ -1079,6 +1101,7 @@ async function runClaimedTeamDelivery({
   const session = deps.store.get(member.session_id);
   const adapter = session ? deps.adapters.get(session.coding_agent) : undefined;
   const output: string[] = [];
+  const team = deps.store.getTeam(delivery.team_id);
   const fail = (error: string) => {
     deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'failed', error);
     deps.store.updateTeamMemberStatus(member.member_id, 'error', null);
@@ -1167,8 +1190,16 @@ async function runClaimedTeamDelivery({
     },
     onPermissionRequest: async (request_id, tool_name, input) => {
       deps.store.updateTeamMemberStatus(member.member_id, 'waiting_permission', delivery.delivery_id);
-      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input });
-      const decision = await permissions.request(session.session_id, request_id);
+      const team_context = teamPermissionContext({
+        team_name: team?.name ?? delivery.team_id,
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        member,
+        session,
+        delivery_id: delivery.delivery_id,
+      });
+      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input, team_context });
+      const decision = await permissions.request(session.session_id, request_id, team_context);
       deps.store.updateTeamMemberStatus(member.member_id, 'running', delivery.delivery_id);
       return decision;
     },
@@ -1315,6 +1346,34 @@ function formatTeamToolInput(input: unknown): string {
   } catch {
     return String(input);
   }
+}
+
+function teamPermissionContext({
+  team_name,
+  team_id,
+  run_id,
+  member,
+  session,
+  delivery_id,
+}: {
+  team_name: string;
+  team_id: string;
+  run_id: string;
+  member: TeamMemberRecord;
+  session: SessionRecord;
+  delivery_id: string;
+}): TeamPermissionContext {
+  return {
+    team_id,
+    team_name,
+    run_id,
+    member_id: member.member_id,
+    member_role: member.role,
+    member_agent: member.coding_agent,
+    delivery_id,
+    session_id: session.session_id,
+    cwd: session.cwd,
+  };
 }
 
 function leaderOnlyPrompt({

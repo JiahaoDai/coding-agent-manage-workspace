@@ -311,8 +311,38 @@ export function App() {
           setPermissionQueue((prev) =>
             prev.some((p) => sameRequest(p, event))
               ? prev
-              : [...prev, { session_id: event.session_id, request_id: event.request_id, tool_name: event.tool_name, input: event.input }],
+              : [
+                  ...prev,
+                  {
+                    session_id: event.session_id,
+                    request_id: event.request_id,
+                    tool_name: event.tool_name,
+                    input: event.input,
+                    team_context: event.team_context,
+                  },
+                ],
           );
+          if (event.team_context) {
+            const context = event.team_context;
+            setTeams((prev) =>
+              prev.map((team) =>
+                team.team_id === context.team_id
+                  ? {
+                      ...team,
+                      members: team.members.map((member) =>
+                        member.member_id === context.member_id
+                          ? {
+                              ...member,
+                              status: 'waiting_permission',
+                              current_delivery_id: context.delivery_id,
+                            }
+                          : member,
+                      ),
+                    }
+                  : team,
+              ),
+            );
+          }
           break;
         case 'permission_response':
           // The request is resolved (by this tab or another); drop it so the
@@ -320,6 +350,27 @@ export function App() {
           // request that happens to share the id must stay queued. Filtering is
           // idempotent for the tab that just answered optimistically.
           setPermissionQueue((prev) => prev.filter((p) => !sameRequest(p, event)));
+          if (event.team_context) {
+            const context = event.team_context;
+            setTeams((prev) =>
+              prev.map((team) =>
+                team.team_id === context.team_id
+                  ? {
+                      ...team,
+                      members: team.members.map((member) =>
+                        member.member_id === context.member_id
+                          ? {
+                              ...member,
+                              status: 'running',
+                              current_delivery_id: context.delivery_id,
+                            }
+                          : member,
+                      ),
+                    }
+                  : team,
+              ),
+            );
+          }
           break;
         case 'team_run_created':
           setTeamTimeline((prev) => {
@@ -900,6 +951,9 @@ export function App() {
             draft={teamDrafts[selectedTeamId] ?? ''}
             items={teamTimeline[selectedTeamId] ?? []}
             sending={sendingTeamRequest[selectedTeamId] ?? false}
+            pendingPermission={
+              pendingPermission?.team_context?.team_id === selectedTeamId ? pendingPermission.team_context : null
+            }
             onDraftChange={(text) => setTeamDrafts((prev) => ({ ...prev, [selectedTeamId]: text }))}
             onSubmit={(text) => void handleTeamSubmit(selectedTeamId, text)}
           />

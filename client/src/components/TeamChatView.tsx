@@ -1,5 +1,5 @@
 import { useEffect, useRef, type FormEvent, type KeyboardEvent } from 'react';
-import type { TeamWithMembers } from '../types';
+import type { TeamPermissionContext, TeamWithMembers } from '../types';
 
 export interface TeamTimelineItem {
   item_id: string;
@@ -33,6 +33,7 @@ export function TeamChatView({
   draft,
   items = [],
   sending = false,
+  pendingPermission = null,
   onDraftChange,
   onSubmit,
 }: {
@@ -42,6 +43,7 @@ export function TeamChatView({
   draft: string;
   items?: TeamTimelineItem[];
   sending?: boolean;
+  pendingPermission?: TeamPermissionContext | null;
   onDraftChange: (text: string) => void;
   onSubmit: (text: string) => void;
 }) {
@@ -121,7 +123,10 @@ export function TeamChatView({
       <div className="team-chat-body">
         <aside className="team-roster" aria-label="Team members">
           {team.members.map((member) => (
-            <article className="team-member-card" key={member.member_id}>
+            <article
+              className={`team-member-card${pendingPermission?.member_id === member.member_id ? ' has-permission-request' : ''}`}
+              key={member.member_id}
+            >
               <div className="team-member-card-head">
                 <h3>{member.role}</h3>
                 <span>{member.status}</span>
@@ -136,6 +141,11 @@ export function TeamChatView({
               {member.current_delivery_id && (
                 <p className="team-member-active" title={member.current_delivery_id}>
                   Active delivery {shortId(member.current_delivery_id)}
+                </p>
+              )}
+              {pendingPermission?.member_id === member.member_id && (
+                <p className="team-member-permission" title={pendingPermission.delivery_id}>
+                  Permission pending
                 </p>
               )}
               <p className="team-member-prompt">{member.responsibility_prompt}</p>
@@ -186,11 +196,12 @@ export function TeamChatView({
                     {deliveryItems.map((item) => {
                       const member = memberById.get(item.member_id ?? '');
                       const isRunning = item.status === 'running';
+                      const permissionPending = pendingPermission?.delivery_id === item.delivery_id;
                       return (
                         <details
-                          className={`team-delivery-card team-delivery-card-${item.status ?? 'unknown'}`}
+                          className={`team-delivery-card team-delivery-card-${item.status ?? 'unknown'}${permissionPending ? ' has-permission-request' : ''}`}
                           key={item.item_id}
-                          open={isRunning}
+                          open={isRunning || permissionPending}
                         >
                           <summary>
                             <span className="team-delivery-summary-main">
@@ -201,6 +212,7 @@ export function TeamChatView({
                               {item.status ?? 'unknown'}
                               {item.delivery_id ? ` · delivery ${shortId(item.delivery_id)}` : ''}
                               {item.attempt_id ? ` · attempt ${shortId(item.attempt_id)}` : ''}
+                              {permissionPending ? ' · permission pending' : ''}
                             </span>
                           </summary>
                           <div className="team-delivery-detail">
