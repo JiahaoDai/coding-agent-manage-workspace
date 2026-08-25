@@ -70,6 +70,9 @@ describe('TeamChatView', () => {
 
     expect(markup).toContain('Product Builder');
     expect(markup).toContain('/project');
+    expect(markup).toContain('aria-label="Team location"');
+    expect(markup).toContain('Agent Team');
+    expect(markup).toContain('&gt;');
     expect(markup).toContain('leader');
     expect(markup).toContain('reviewer');
     expect(markup).toContain('fake · default model');

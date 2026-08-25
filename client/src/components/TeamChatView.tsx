@@ -131,13 +131,21 @@ export function TeamChatView({
   return (
     <section className="team-chat" aria-labelledby="team-chat-title">
       <header className="team-chat-header">
-        <div className="team-chat-heading">
-          <p className="team-overview-kicker">Agent team</p>
-          <h2 id="team-chat-title">{team.name}</h2>
-          <p className="team-overview-cwd" title={team.cwd}>
+        <nav className="team-chat-heading" aria-label="Team location">
+          <span className="team-chat-crumb">Agent Team</span>
+          <span className="team-chat-separator" aria-hidden="true">
+            &gt;
+          </span>
+          <h2 id="team-chat-title" title={team.name}>
+            {team.name}
+          </h2>
+          <span className="team-chat-separator" aria-hidden="true">
+            &gt;
+          </span>
+          <span className="team-chat-cwd" title={team.cwd}>
             {team.cwd}
-          </p>
-        </div>
+          </span>
+        </nav>
         <span className={`team-status team-status-${team.status}`}>{team.status}</span>
       </header>
 

@@ -1202,22 +1202,44 @@ button {
 
 .team-chat-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 18px;
-  padding: 18px 24px;
+  gap: 14px;
+  min-height: 44px;
+  padding: 8px 18px;
   border-bottom: 1px solid var(--border);
 }
 
 .team-chat-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: 1;
   min-width: 0;
+  color: var(--text-secondary);
+  font-size: 0.86rem;
+  white-space: nowrap;
 }
 
 .team-chat-heading h2 {
   margin: 0;
-  font-size: 1.15rem;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 0.95rem;
   font-weight: 600;
+  text-overflow: ellipsis;
+}
+
+.team-chat-crumb,
+.team-chat-separator {
+  flex: 0 0 auto;
+}
+
+.team-chat-cwd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .team-chat-body {
@@ -1586,7 +1608,7 @@ button {
   }
 
   .team-chat-header {
-    padding: 14px 16px;
+    padding: 8px 12px;
   }
 }
 
