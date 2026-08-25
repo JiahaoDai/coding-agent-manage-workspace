@@ -33,6 +33,7 @@ import {
 
 const WORKSPACE_STORAGE_KEY = 'coding-agent-dashboard.workspace.v1';
 const SIDEBAR_STORAGE_KEY = 'coding-agent-dashboard.sidebar-collapsed.v1';
+const SELECTED_TEAM_STORAGE_KEY = 'coding-agent-dashboard.selected-team.v1';
 
 /** Prepend only if the session is not already present — both the POST response
  * and the SSE `session_created` event may deliver the same session. */
@@ -234,7 +235,18 @@ export function App() {
   useEffect(() => {
     void listAgents().then(setAgents);
     void listTeams()
-      .then(setTeams)
+      .then((list) => {
+        setTeams(list);
+        if (typeof window !== 'undefined') {
+          const restoredTeamId = window.localStorage.getItem(SELECTED_TEAM_STORAGE_KEY);
+          if (restoredTeamId && list.some((team) => team.team_id === restoredTeamId)) {
+            setSelectedTeamId(restoredTeamId);
+            setWorkspace(emptyWorkspace);
+          } else if (restoredTeamId) {
+            window.localStorage.removeItem(SELECTED_TEAM_STORAGE_KEY);
+          }
+        }
+      })
       .catch(() => setTeams([]))
       .finally(() => setTeamsLoaded(true));
     void listSessions().then((list) => {
@@ -258,6 +270,15 @@ export function App() {
     if (!sessionsLoaded) return;
     setWorkspace((prev) => restoreWorkspace(serializeWorkspace(prev), new Set(sessions.map((session) => session.session_id))));
   }, [sessions, sessionsLoaded]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (selectedTeamId) {
+      window.localStorage.setItem(SELECTED_TEAM_STORAGE_KEY, selectedTeamId);
+    } else {
+      window.localStorage.removeItem(SELECTED_TEAM_STORAGE_KEY);
+    }
+  }, [selectedTeamId]);
 
   useEffect(() => {
     const source = new EventSource('/api/events');

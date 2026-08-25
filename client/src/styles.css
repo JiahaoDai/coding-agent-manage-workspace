@@ -1163,6 +1163,13 @@ button {
   font-weight: 600;
 }
 
+.team-member-broken {
+  margin: 8px 0 0;
+  color: var(--status-error);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
 .team-chat {
   display: flex;
   flex-direction: column;
@@ -1448,6 +1455,22 @@ button {
 
 .team-delivery-empty {
   margin: 0;
+}
+
+.team-delivery-session {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-delivery-session:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
 }
 
 .team-composer {

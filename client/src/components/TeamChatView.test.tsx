@@ -199,6 +199,8 @@ describe('TeamChatView', () => {
     expect(markup).toContain('Leader response');
     expect(markup).toContain('{&quot;type&quot;:&quot;final&quot;');
     expect(markup).toContain('Review delivery');
+    expect(markup).toContain('Member session session-2');
+    expect(markup).toContain('href="/api/sessions/session-2/messages"');
     expect(markup).toContain('[thinking] Checking tests.');
     expect(markup).toContain('[tool start] Bash tc-1 {&quot;command&quot;:&quot;npm test&quot;}');
     expect(markup).toContain('[status] Running tests.');
@@ -251,6 +253,39 @@ describe('TeamChatView', () => {
     expect(markup).toContain('waiting_user');
     expect(markup).toContain('Which storage should the team use?');
     expect(markup).toContain('Answer the leader...');
+  });
+
+  it('shows missing member sessions as recoverable broken references', () => {
+    const markup = renderToStaticMarkup(
+      <TeamChatView
+        team={{
+          ...team,
+          members: team.members.map((member) =>
+            member.member_id === 'member-2' ? { ...member, session_missing: true } : member,
+          ),
+        }}
+        draft=""
+        items={[
+          {
+            item_id: 'stream-2',
+            run_id: 'run-1',
+            kind: 'delivery_stream',
+            label: 'Review delivery',
+            text: 'Completed.',
+            status: 'done',
+            member_id: 'member-2',
+            delivery_id: 'delivery-review',
+            create_time: 1,
+          },
+        ]}
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('Session reference missing');
+    expect(markup).toContain('Member session session-2');
+    expect(markup).toContain('missing');
   });
 
   it('keeps the ordinary session workflow renderable beside team chat work', () => {

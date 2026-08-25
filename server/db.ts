@@ -899,9 +899,14 @@ export class SessionStore {
   private listTeamMembers(team_id: string): TeamMemberRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT member_id, team_id, role, coding_agent, session_id, model, responsibility_prompt,
-                status, current_delivery_id, create_time, modify_time
-         FROM team_member WHERE team_id = ? ORDER BY create_time ASC`,
+        `SELECT member.member_id, member.team_id, member.role, member.coding_agent, member.session_id,
+                member.model, member.responsibility_prompt, member.status, member.current_delivery_id,
+                member.create_time, member.modify_time,
+                CASE WHEN session.session_id IS NULL THEN 1 ELSE 0 END AS session_missing
+         FROM team_member member
+         LEFT JOIN session ON session.session_id = member.session_id
+         WHERE member.team_id = ?
+         ORDER BY member.create_time ASC`,
       )
       .all(team_id) as TeamMemberRow[];
     return rows.map(toTeamMember);
@@ -1034,6 +1039,7 @@ interface TeamMemberRow {
   responsibility_prompt: string;
   status: TeamMemberRecord['status'];
   current_delivery_id: string | null;
+  session_missing?: 0 | 1;
   create_time: number;
   modify_time: number;
 }
@@ -1085,7 +1091,8 @@ function toTeam(row: TeamRow): TeamRecord {
 }
 
 function toTeamMember(row: TeamMemberRow): TeamMemberRecord {
-  return { ...row };
+  const { session_missing, ...member } = row;
+  return session_missing === 1 ? { ...member, session_missing: true } : member;
 }
 
 function toTeamRun(row: TeamRunRow): TeamRunRecord {

@@ -185,4 +185,29 @@ describe('SessionStore agent team persistence', () => {
       db.close();
     }
   });
+
+  it('marks team member session references as missing instead of failing team reads', () => {
+    const db = new Database(':memory:');
+    try {
+      const store = new SessionStore(db);
+      store.insert(session());
+      store.insertTeam(team(), [member()]);
+
+      store.delete('dashboard-session-1');
+
+      expect(store.listTeams()).toEqual([
+        {
+          ...team(),
+          members: [
+            {
+              ...member(),
+              session_missing: true,
+            },
+          ],
+        },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
 });

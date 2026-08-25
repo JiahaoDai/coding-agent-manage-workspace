@@ -277,6 +277,129 @@ describe('walking skeleton', () => {
     }
   });
 
+  it('persists team runs across a restart as collaboration metadata without native transcript bodies', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-team-history-'));
+    const dbPath = join(dir, 'sessions.db');
+    try {
+      const first = await startServer({ dbPath });
+      try {
+        first.fake.promptScript = (handlers, ctx) => {
+          if (ctx.input.includes('You are ')) {
+            handlers.onStatusChange('completed');
+            return;
+          }
+          if (ctx.input.includes('User request:')) {
+            handlers.onTextDelta(JSON.stringify({
+              type: 'plan',
+              summary: 'Implement and summarize the metadata-only history.',
+              assignments: [
+                {
+                  id: 'metadata',
+                  to: 'backend-coder',
+                  task: 'Write the persisted collaboration metadata summary.',
+                  context: 'Do not store full native transcript details.',
+                  depends_on: [],
+                },
+              ],
+            }));
+            handlers.onStatusChange('completed');
+            return;
+          }
+          if (ctx.input.includes('New delivery:')) {
+            handlers.onThinkingDelta('PRIVATE_NATIVE_THINKING_TRACE');
+            handlers.onToolCallStart('tool-private', 'Bash', { command: 'cat native.log' });
+            handlers.onToolCallEnd('tool-private');
+            handlers.onTextDelta('RESULT: Stored run metadata and delivery summaries.');
+            handlers.onStatusChange('completed');
+            return;
+          }
+          if (ctx.input.includes('New inbound team message:')) {
+            handlers.onTextDelta(JSON.stringify({
+              type: 'final',
+              summary: 'History persisted.',
+              result: 'Team history now reloads from collaboration metadata.',
+            }));
+            handlers.onStatusChange('completed');
+          }
+        };
+
+        const createdTeam = await post(first.baseUrl, '/api/teams', {
+          name: 'History Team',
+          cwd: '/tmp/team-history',
+          members: [
+            {
+              role: 'leader',
+              agent: 'fake',
+              model: null,
+              responsibility_prompt: 'Lead history work.',
+            },
+            {
+              role: 'backend-coder',
+              agent: 'fake',
+              model: null,
+              responsibility_prompt: 'Implement history work.',
+            },
+          ],
+        });
+        expect(createdTeam.status).toBe(201);
+        const team = await createdTeam.json() as { team_id: string };
+
+        const sseRes = await fetch(`${first.baseUrl}/api/events`);
+        const reader = sseRes.body!.getReader();
+        await sleep(30);
+
+        const runResponse = await post(first.baseUrl, `/api/teams/${team.team_id}/runs`, {
+          text: 'Persist this team run.',
+        });
+        expect(runResponse.status).toBe(202);
+        await collectEvents(reader, (events) => events.some((event) => event.type === 'team_run_completed'));
+        await reader.cancel();
+      } finally {
+        first.server.close();
+        first.db.close();
+      }
+
+      const second = await startServer({ dbPath });
+      try {
+        const teams = await (await fetch(`${second.baseUrl}/api/teams`)).json() as Array<{
+          team_id: string;
+          name: string;
+          status: string;
+          members: Array<{ role: string; session_id: string; session_missing?: boolean }>;
+        }>;
+        expect(teams).toHaveLength(1);
+        expect(teams[0]).toMatchObject({ name: 'History Team', status: 'idle' });
+        expect(teams[0].members.map((member) => member.role)).toEqual(['leader', 'backend-coder']);
+        expect(teams[0].members.some((member) => member.session_missing)).toBe(false);
+
+        const runs = await (await fetch(`${second.baseUrl}/api/teams/${teams[0].team_id}/runs`)).json() as Array<{
+          run: { status: string };
+          messages: Array<{ kind: string; content: string }>;
+          deliveries: Array<{ status: string; to_member_id: string }>;
+          dependencies: unknown[];
+        }>;
+        expect(runs).toHaveLength(1);
+        expect(runs[0].run.status).toBe('completed');
+        expect(runs[0].messages.map((message) => message.kind)).toEqual([
+          'user_request',
+          'status',
+          'assignment',
+          'result',
+          'final',
+        ]);
+        expect(runs[0].messages.at(-1)?.content).toBe('Team history now reloads from collaboration metadata.');
+        expect(runs[0].deliveries.map((delivery) => delivery.status)).toEqual(['done', 'done', 'done']);
+        expect(JSON.stringify(runs[0])).not.toContain('PRIVATE_NATIVE_THINKING_TRACE');
+        expect(JSON.stringify(runs[0])).not.toContain('tool-private');
+      } finally {
+        second.server.close();
+        second.db.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('streams a session_created event tagged with session_id over SSE', async () => {
     const { db, server, baseUrl } = await startServer();
     try {

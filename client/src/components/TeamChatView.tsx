@@ -139,6 +139,11 @@ export function TeamChatView({
               <p className="team-member-session" title={member.session_id}>
                 {member.session_id}
               </p>
+              {member.session_missing && (
+                <p className="team-member-broken" title={member.session_id}>
+                  Session reference missing
+                </p>
+              )}
               {member.current_delivery_id && (
                 <p className="team-member-active" title={member.current_delivery_id}>
                   Active delivery {shortId(member.current_delivery_id)}
@@ -226,6 +231,16 @@ export function TeamChatView({
                               <pre>{item.text}</pre>
                             ) : (
                               <p className="team-delivery-empty">{deliveryStatusText(item.status)}</p>
+                            )}
+                            {member && (
+                              <a
+                                className="team-delivery-session"
+                                href={`/api/sessions/${encodeURIComponent(member.session_id)}/messages`}
+                                title={member.session_id}
+                              >
+                                Member session {member.session_id}
+                                {member.session_missing ? ' · missing' : ''}
+                              </a>
                             )}
                           </div>
                         </details>
