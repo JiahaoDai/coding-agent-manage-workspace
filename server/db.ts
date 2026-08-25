@@ -664,6 +664,106 @@ export class SessionStore {
     return this.getTeamRun(run_id)!.run;
   }
 
+  waitTeamRunForUser(input: {
+    team_id: string;
+    run_id: string;
+    leader_member_id: string;
+    delivery_id: string;
+    question_message_id: string;
+    question: string;
+    now: number;
+  }): { run: TeamRunRecord; question_message: TeamMessageRecord; delivery: TeamMessageDeliveryRecord } {
+    const wait = this.db.transaction(() => {
+      const question_message: TeamMessageRecord = {
+        message_id: input.question_message_id,
+        team_id: input.team_id,
+        run_id: input.run_id,
+        from_member_id: input.leader_member_id,
+        from_kind: 'member',
+        kind: 'need_info',
+        content: input.question,
+        create_time: input.now,
+      };
+
+      this.insertTeamMessage(question_message);
+      this.db
+        .prepare(
+          `UPDATE team_message_delivery
+           SET status = 'done',
+               finished_at = ?
+           WHERE delivery_id = ?`,
+        )
+        .run(input.now, input.delivery_id);
+      this.db
+        .prepare(`UPDATE team_member SET status = 'idle', current_delivery_id = NULL, modify_time = ? WHERE member_id = ?`)
+        .run(input.now, input.leader_member_id);
+      this.db.prepare(`UPDATE team_run SET status = 'waiting_user', finish_time = NULL WHERE run_id = ?`).run(input.run_id);
+      this.db.prepare(`UPDATE team SET status = 'waiting_user', modify_time = ? WHERE team_id = ?`).run(input.now, input.team_id);
+
+      const run = this.getTeamRun(input.run_id)!.run;
+      const delivery = this.listTeamDeliveries(input.run_id).find((item) => item.delivery_id === input.delivery_id)!;
+      return { run, question_message, delivery };
+    });
+
+    return wait();
+  }
+
+  resumeWaitingTeamRun(input: {
+    team_id: string;
+    leader_member_id: string;
+    user_message_id: string;
+    delivery_id: string;
+    content: string;
+    now: number;
+  }): TeamRunWithItems | undefined {
+    const resume = this.db.transaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT run_id, team_id, root_user_message_id, status, max_rounds, current_round, create_time, finish_time
+           FROM team_run
+           WHERE team_id = ? AND status = 'waiting_user'
+           ORDER BY create_time DESC
+           LIMIT 1`,
+        )
+        .get(input.team_id) as TeamRunRow | undefined;
+      if (!row) return undefined;
+      const run = toTeamRun(row);
+
+      const message: TeamMessageRecord = {
+        message_id: input.user_message_id,
+        team_id: input.team_id,
+        run_id: run.run_id,
+        from_member_id: null,
+        from_kind: 'user',
+        kind: 'user_request',
+        content: input.content,
+        create_time: input.now,
+      };
+      const delivery: TeamMessageDeliveryRecord = {
+        delivery_id: input.delivery_id,
+        message_id: input.user_message_id,
+        team_id: input.team_id,
+        run_id: run.run_id,
+        to_member_id: input.leader_member_id,
+        status: 'pending',
+        enqueue_seq: this.nextMemberQueueSeq(input.leader_member_id),
+        created_at: input.now,
+        started_at: null,
+        finished_at: null,
+        error: null,
+      };
+
+      this.insertTeamMessage(message);
+      this.insertTeamDelivery(delivery);
+      this.db.prepare(`UPDATE team_run SET status = 'running', finish_time = NULL WHERE run_id = ?`).run(run.run_id);
+      this.db.prepare(`UPDATE team SET status = 'running', modify_time = ? WHERE team_id = ?`).run(input.now, input.team_id);
+
+      return this.getTeamRun(run.run_id)!;
+    });
+
+    return resume();
+  }
+
   insertTeamMessageRecord(message: TeamMessageRecord): void {
     this.insertTeamMessage(message);
   }

@@ -71,6 +71,22 @@ export type ServerEvent =
       final_message: TeamMessageRecord;
     }
   | {
+      type: 'team_run_waiting_user';
+      session_id?: undefined;
+      team_id: string;
+      run: TeamRunRecord;
+      question_message: TeamMessageRecord;
+      delivery: TeamMessageDeliveryRecord;
+    }
+  | {
+      type: 'team_run_resumed';
+      session_id?: undefined;
+      team_id: string;
+      run: TeamRunRecord;
+      user_message: TeamMessageRecord;
+      delivery: TeamMessageDeliveryRecord;
+    }
+  | {
       type: 'team_plan_created';
       session_id?: undefined;
       team_id: string;

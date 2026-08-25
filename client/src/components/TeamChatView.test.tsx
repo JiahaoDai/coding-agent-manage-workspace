@@ -226,6 +226,33 @@ describe('TeamChatView', () => {
     expect(missing).toContain('Team not found');
   });
 
+  it('invites the user to answer when the team is waiting for clarification', () => {
+    const markup = renderToStaticMarkup(
+      <TeamChatView
+        team={{ ...team, status: 'waiting_user' }}
+        draft=""
+        items={[
+          {
+            item_id: 'need-info-1',
+            run_id: 'run-1',
+            kind: 'need_info',
+            label: 'Need info',
+            text: 'Which storage should the team use?',
+            status: 'waiting_user',
+            member_id: 'member-1',
+            create_time: 1,
+          },
+        ]}
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('waiting_user');
+    expect(markup).toContain('Which storage should the team use?');
+    expect(markup).toContain('Answer the leader...');
+  });
+
   it('keeps the ordinary session workflow renderable beside team chat work', () => {
     const markup = renderToStaticMarkup(
       <ConversationView session={session} messages={[]} onSend={() => {}} />,

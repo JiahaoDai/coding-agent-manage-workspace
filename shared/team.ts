@@ -1,6 +1,6 @@
 import type { AgentId } from './session';
 
-export type TeamStatus = 'idle' | 'running' | 'error' | 'archived';
+export type TeamStatus = 'idle' | 'running' | 'waiting_user' | 'error' | 'archived';
 export type TeamMemberStatus = 'idle' | 'running' | 'waiting_permission' | 'error';
 export type TeamRunStatus = 'running' | 'waiting_user' | 'completed' | 'failed' | 'cancelled';
 export type TeamMessageKind =

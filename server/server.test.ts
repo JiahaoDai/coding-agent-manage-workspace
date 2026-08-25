@@ -750,6 +750,134 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
       db.close();
     }
   });
+
+  it('moves a leader need_user_input outcome into waiting_user and resumes the same run from the user answer', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('You are ')) {
+          handlers.onStatusChange('completed');
+          return;
+        }
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'need_user_input',
+            question: 'Which storage should the team use?',
+          }));
+          handlers.onStatusChange('completed');
+          return;
+        }
+        if (ctx.input.includes('New inbound team message:')) {
+          expect(ctx.input).toContain('Use the existing SQLite database.');
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Storage clarified.',
+            result: 'The team will use the existing SQLite database.',
+          }));
+          handlers.onStatusChange('completed');
+        }
+      };
+
+      const createdTeam = await post(baseUrl, '/api/teams', {
+        name: 'Clarifying Team',
+        cwd: '/tmp/team-project',
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Lead the team and ask for clarification when needed.',
+          },
+        ],
+      });
+      expect(createdTeam.status).toBe(201);
+      const team = await createdTeam.json() as { team_id: string; members: Array<{ member_id: string }> };
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Plan the storage work.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const waitingEvents = await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_waiting_user'),
+      );
+      const waiting = waitingEvents.find(
+        (event): event is Extract<ServerEvent, { type: 'team_run_waiting_user' }> =>
+          event.type === 'team_run_waiting_user',
+      )!;
+      expect(waiting.run.status).toBe('waiting_user');
+      expect(waiting.question_message).toMatchObject({
+        kind: 'need_info',
+        content: 'Which storage should the team use?',
+        from_member_id: team.members[0].member_id,
+      });
+      expect(waiting.delivery.status).toBe('done');
+
+      let runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { run_id: string; status: string; finish_time: number | null };
+        messages: Array<{ kind: string; content: string }>;
+        deliveries: Array<{ status: string }>;
+      }>;
+      expect(runs).toHaveLength(1);
+      expect(runs[0].run).toMatchObject({ run_id: waiting.run.run_id, status: 'waiting_user', finish_time: null });
+      expect(runs[0].messages.map((message) => message.kind)).toEqual(['user_request', 'need_info']);
+      expect(runs[0].deliveries).toHaveLength(1);
+      expect(runs[0].deliveries[0].status).toBe('done');
+
+      const listedTeams = await (await fetch(`${baseUrl}/api/teams`)).json() as Array<{ team_id: string; status: string }>;
+      expect(listedTeams.find((item) => item.team_id === team.team_id)?.status).toBe('waiting_user');
+
+      const resumeResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Use the existing SQLite database.',
+      });
+      expect(resumeResponse.status).toBe(202);
+      const resumedBody = await resumeResponse.json() as { run: { run_id: string; status: string } };
+      expect(resumedBody.run.run_id).toBe(waiting.run.run_id);
+      expect(resumedBody.run.status).toBe('running');
+
+      const resumedEvents = await collectEvents(
+        reader,
+        (evs) =>
+          evs.some((event) => event.type === 'team_run_resumed') &&
+          evs.some((event) => event.type === 'team_run_completed'),
+      );
+      const resumed = resumedEvents.find(
+        (event): event is Extract<ServerEvent, { type: 'team_run_resumed' }> =>
+          event.type === 'team_run_resumed',
+      )!;
+      const completed = resumedEvents.find(
+        (event): event is Extract<ServerEvent, { type: 'team_run_completed' }> =>
+          event.type === 'team_run_completed',
+      )!;
+      expect(resumed.run.run_id).toBe(waiting.run.run_id);
+      expect(resumed.user_message).toMatchObject({
+        kind: 'user_request',
+        content: 'Use the existing SQLite database.',
+      });
+      expect(completed.run.status).toBe('completed');
+      expect(completed.final_message.content).toBe('The team will use the existing SQLite database.');
+
+      runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as typeof runs;
+      expect(runs).toHaveLength(1);
+      expect(runs[0].run.status).toBe('completed');
+      expect(runs[0].messages.map((message) => message.kind)).toEqual([
+        'user_request',
+        'need_info',
+        'user_request',
+        'final',
+      ]);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
 });
 
 describe('agent team leader plan parsing (v3 ticket #4)', () => {

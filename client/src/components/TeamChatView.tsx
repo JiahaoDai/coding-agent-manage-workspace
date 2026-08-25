@@ -49,6 +49,7 @@ export function TeamChatView({
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const teamRunning = team?.status === 'running';
+  const teamWaitingUser = team?.status === 'waiting_user';
   const canSubmit = draft.trim() !== '' && team !== null && !loading && !sending && !teamRunning;
 
   useEffect(() => {
@@ -246,7 +247,7 @@ export function TeamChatView({
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={handleKeyDown}
           rows={1}
-          placeholder={teamRunning ? 'Team is running...' : 'Message the team...'}
+          placeholder={teamRunning ? 'Team is running...' : teamWaitingUser ? 'Answer the leader...' : 'Message the team...'}
           disabled={teamRunning || sending}
         />
         <div className="composer-toolbar">

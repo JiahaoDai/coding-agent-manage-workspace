@@ -85,7 +85,7 @@ function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
           item_id: `message:${message.message_id}`,
           run_id: run.run.run_id,
           kind: 'user_request',
-          label: 'User request',
+          label: message.message_id === run.run.root_user_message_id ? 'User request' : 'User reply',
           text: message.content,
           status: run.run.status,
           create_time: message.create_time,
@@ -500,6 +500,84 @@ export function App() {
             }),
           }));
           setSendingTeamRequest((prev) => ({ ...prev, [event.team_id]: false }));
+          void listTeams().then(setTeams);
+          break;
+        case 'team_run_waiting_user':
+          setTeamTimeline((prev) => {
+            const itemId = `delivery:${event.delivery.delivery_id}:stream`;
+            const existing = prev[event.team_id]?.find((item) => item.item_id === itemId);
+            let items = putTimelineItem(prev[event.team_id] ?? [], {
+              item_id: itemId,
+              run_id: event.run.run_id,
+              kind: 'delivery_stream',
+              label: existing?.label ?? 'Leader response',
+              text: existing?.text ?? '',
+              status: event.delivery.status,
+              member_id: event.delivery.to_member_id,
+              delivery_id: event.delivery.delivery_id,
+              create_time: existing?.create_time ?? event.delivery.created_at,
+            });
+            items = putTimelineItem(items, {
+              item_id: `delivery:${event.delivery.delivery_id}:activity:${event.delivery.status}`,
+              run_id: event.run.run_id,
+              kind: 'delivery_activity',
+              label: 'Delivery status',
+              text: deliveryActivityText(event.delivery.status),
+              status: event.delivery.status,
+              member_id: event.delivery.to_member_id,
+              delivery_id: event.delivery.delivery_id,
+              create_time: event.delivery.finished_at ?? event.question_message.create_time,
+            });
+            items = putTimelineItem(items, {
+              item_id: `message:${event.question_message.message_id}`,
+              run_id: event.run.run_id,
+              kind: 'need_info',
+              label: 'Need info',
+              text: event.question_message.content,
+              status: event.run.status,
+              member_id: event.question_message.from_member_id,
+              create_time: event.question_message.create_time,
+            });
+            return { ...prev, [event.team_id]: items.sort((a, b) => a.create_time - b.create_time) };
+          });
+          setSendingTeamRequest((prev) => ({ ...prev, [event.team_id]: false }));
+          void listTeams().then(setTeams);
+          break;
+        case 'team_run_resumed':
+          setTeamTimeline((prev) => {
+            let items = putTimelineItem(prev[event.team_id] ?? [], {
+              item_id: `message:${event.user_message.message_id}`,
+              run_id: event.run.run_id,
+              kind: 'user_request',
+              label: 'User reply',
+              text: event.user_message.content,
+              status: event.run.status,
+              create_time: event.user_message.create_time,
+            });
+            items = putTimelineItem(items, {
+              item_id: `delivery:${event.delivery.delivery_id}:stream`,
+              run_id: event.run.run_id,
+              kind: 'delivery_stream',
+              label: 'Leader follow-up',
+              text: '',
+              status: event.delivery.status,
+              member_id: event.delivery.to_member_id,
+              delivery_id: event.delivery.delivery_id,
+              create_time: event.delivery.created_at,
+            });
+            items = putTimelineItem(items, {
+              item_id: `delivery:${event.delivery.delivery_id}:activity:${event.delivery.status}`,
+              run_id: event.run.run_id,
+              kind: 'delivery_activity',
+              label: 'Delivery status',
+              text: deliveryActivityText(event.delivery.status),
+              status: event.delivery.status,
+              member_id: event.delivery.to_member_id,
+              delivery_id: event.delivery.delivery_id,
+              create_time: event.delivery.created_at,
+            });
+            return { ...prev, [event.team_id]: items.sort((a, b) => a.create_time - b.create_time) };
+          });
           void listTeams().then(setTeams);
           break;
         case 'team_plan_created':

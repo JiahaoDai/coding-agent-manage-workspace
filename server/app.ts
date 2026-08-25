@@ -106,6 +106,31 @@ export function createApp(deps: AppDeps): Hono {
     if (!adapter) return c.json({ error: `unknown agent: ${session.coding_agent}` }, 400);
 
     const now = Date.now();
+    if (team.status === 'waiting_user') {
+      const user_message_id = randomUUID();
+      const delivery_id = randomUUID();
+      const resumed = deps.store.resumeWaitingTeamRun({
+        team_id,
+        leader_member_id: leader.member_id,
+        user_message_id,
+        delivery_id,
+        content: text.trim(),
+        now,
+      });
+      if (!resumed) return c.json({ error: 'team is not waiting for user input' }, 409);
+
+      const user_message = resumed.messages.find((message) => message.message_id === user_message_id)!;
+      const delivery = resumed.deliveries.find((item) => item.delivery_id === delivery_id)!;
+      deps.sse.broadcast({ type: 'team_run_resumed', team_id, run: resumed.run, user_message, delivery });
+      void runTeamOrchestrator({
+        deps,
+        permissions,
+        team_id,
+        run_id: resumed.run.run_id,
+      });
+      return c.json(resumed, 202);
+    }
+
     const created = deps.store.createLeaderRun({
       run_id: randomUUID(),
       team_id,
@@ -700,6 +725,19 @@ async function runLeaderOnlyDelivery({
       return;
     }
 
+    if (outcome.type === 'need_user_input') {
+      markLeaderWaitingForUser({
+        deps,
+        team_id,
+        run_id: run.run_id,
+        leader,
+        session,
+        delivery_id,
+        question: outcome.question,
+      });
+      return;
+    }
+
     const finalMessage: TeamMessageRecord = {
       message_id: randomUUID(),
       team_id,
@@ -775,6 +813,9 @@ async function runTeamOrchestrator({
   run_id: string;
 }): Promise<void> {
   for (;;) {
+    const currentRun = deps.store.getTeamRun(run_id)?.run;
+    if (!currentRun || currentRun.status !== 'running') break;
+
     const released = deps.store.releaseSatisfiedBlockedDeliveries(run_id);
     for (const delivery of released) {
       deps.sse.broadcast({
@@ -820,6 +861,55 @@ async function runTeamOrchestrator({
   }
 
   deps.store.completeRunIfNoOpenDeliveries(run_id);
+}
+
+function markLeaderWaitingForUser({
+  deps,
+  team_id,
+  run_id,
+  leader,
+  session,
+  delivery_id,
+  question,
+}: {
+  deps: AppDeps;
+  team_id: string;
+  run_id: string;
+  leader: TeamMemberRecord;
+  session: SessionRecord;
+  delivery_id: string;
+  question: string;
+}): void {
+  const waiting = deps.store.waitTeamRunForUser({
+    team_id,
+    run_id,
+    leader_member_id: leader.member_id,
+    delivery_id,
+    question_message_id: randomUUID(),
+    question,
+    now: Date.now(),
+  });
+
+  const current = deps.store.get(session.session_id);
+  if (current && current.status === 'running') {
+    deps.store.updateStatus(session.session_id, 'completed');
+    deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'completed' });
+  }
+  deps.sse.broadcast({
+    type: 'team_delivery_status_change',
+    team_id,
+    run_id,
+    delivery_id,
+    member_id: leader.member_id,
+    status: 'done',
+  });
+  deps.sse.broadcast({
+    type: 'team_run_waiting_user',
+    team_id,
+    run: waiting.run,
+    question_message: waiting.question_message,
+    delivery: waiting.delivery,
+  });
 }
 
 async function runClaimedLeaderFollowUpDelivery({
@@ -1035,6 +1125,19 @@ async function runClaimedLeaderFollowUpDelivery({
         assignment_messages: planned.assignment_messages,
         deliveries: planned.deliveries,
         dependencies: planned.dependencies,
+      });
+      return;
+    }
+
+    if (outcome.type === 'need_user_input') {
+      markLeaderWaitingForUser({
+        deps,
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        leader,
+        session,
+        delivery_id: delivery.delivery_id,
+        question: outcome.question,
       });
       return;
     }
@@ -1403,7 +1506,7 @@ function leaderOnlyPrompt({
     'User request:',
     text,
     '',
-    'Decide whether to finish now or create a plan for other team members.',
+    'Decide whether to finish now, ask the user for clarification, or create a plan for other team members.',
     'Available member roles for assignments:',
     ...memberLines,
     '',
@@ -1418,6 +1521,9 @@ function leaderOnlyPrompt({
     '',
     'Final shape:',
     '{"type":"final","summary":"short summary","result":"final answer for the user"}',
+    '',
+    'Need user input shape:',
+    '{"type":"need_user_input","question":"clear question for the user"}',
     '',
     'Plan shape:',
     '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
@@ -1466,7 +1572,7 @@ function leaderFollowUpPrompt({
     'Run message bus summary:',
     busLines.length > 0 ? busLines.join('\n') : '- none',
     '',
-    'Decide whether to finish now or create another plan for existing team members.',
+    'Decide whether to finish now, ask the user for clarification, or create another plan for existing team members.',
     'Available member roles for assignments:',
     ...memberLines,
     '',
@@ -1479,6 +1585,9 @@ function leaderFollowUpPrompt({
     '',
     'Final shape:',
     '{"type":"final","summary":"short summary","result":"final answer for the user"}',
+    '',
+    'Need user input shape:',
+    '{"type":"need_user_input","question":"clear question for the user"}',
     '',
     'Plan shape:',
     '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
@@ -1494,6 +1603,7 @@ function leaderJsonRetryPrompt(previous: string, error: string): string {
     'Do not add prose, markdown fences, or comments.',
     'Allowed shapes:',
     '{"type":"final","summary":"short summary","result":"final answer for the user"}',
+    '{"type":"need_user_input","question":"clear question for the user"}',
     '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
     '',
     'Strict JSON reminders:',
@@ -1558,6 +1668,7 @@ interface ValidatedPlanAssignment {
 type LeaderOutcome =
   | { type: 'final'; summary: string; result: string }
   | { type: 'plan'; summary: string; assignments: ValidatedPlanAssignment[] }
+  | { type: 'need_user_input'; question: string }
   | { error: string };
 
 function parseLeaderOutcome(raw: string, members: TeamWithMembers['members']): LeaderOutcome {
@@ -1576,8 +1687,13 @@ function parseLeaderOutcome(raw: string, members: TeamWithMembers['members']): L
   }
 
   if (parsed.value.type === 'plan') return validateLeaderPlan(parsed.value, members);
+  if (parsed.value.type === 'need_user_input') {
+    const question = typeof parsed.value.question === 'string' ? parsed.value.question.trim() : '';
+    if (!question) return { error: 'leader need_user_input question is required' };
+    return { type: 'need_user_input', question };
+  }
 
-  return { error: 'leader response type must be final or plan' };
+  return { error: 'leader response type must be final, plan, or need_user_input' };
 }
 
 function parseLeaderJson(raw: string): { value: Record<string, unknown> } | { error: string } {
@@ -1609,7 +1725,7 @@ function shouldRetryLeaderJson(raw: string, error: string): boolean {
   return [
     'leader response was not valid JSON',
     'leader response did not contain JSON',
-    'leader response type must be final or plan',
+    'leader response type must be final, plan, or need_user_input',
     'leader JSON must be an object',
   ].includes(error);
 }
