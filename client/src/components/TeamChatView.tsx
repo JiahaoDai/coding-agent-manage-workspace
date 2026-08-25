@@ -4,10 +4,25 @@ import type { TeamWithMembers } from '../types';
 export interface TeamTimelineItem {
   item_id: string;
   run_id: string;
-  kind: 'user_request' | 'leader_response' | 'plan' | 'assignment' | 'result' | 'review' | 'need_info' | 'proposal' | 'final' | 'error';
+  kind:
+    | 'user_request'
+    | 'leader_response'
+    | 'delivery_stream'
+    | 'delivery_activity'
+    | 'plan'
+    | 'assignment'
+    | 'result'
+    | 'review'
+    | 'need_info'
+    | 'proposal'
+    | 'final'
+    | 'error';
   label: string;
   text: string;
   status?: string;
+  member_id?: string | null;
+  delivery_id?: string | null;
+  attempt_id?: string | null;
   create_time: number;
 }
 
@@ -76,6 +91,14 @@ export function TeamChatView({
     );
   }
 
+  const memberById = new Map(team.members.map((member) => [member.member_id, member]));
+  const deliveryItems = items
+    .filter((item) => item.kind === 'delivery_stream')
+    .sort((a, b) => a.create_time - b.create_time);
+  const activityItems = items
+    .filter((item) => item.kind !== 'delivery_stream')
+    .sort((a, b) => a.create_time - b.create_time);
+
   return (
     <section className="team-chat" aria-labelledby="team-chat-title">
       <header className="team-chat-header">
@@ -110,6 +133,11 @@ export function TeamChatView({
               <p className="team-member-session" title={member.session_id}>
                 {member.session_id}
               </p>
+              {member.current_delivery_id && (
+                <p className="team-member-active" title={member.current_delivery_id}>
+                  Active delivery {shortId(member.current_delivery_id)}
+                </p>
+              )}
               <p className="team-member-prompt">{member.responsibility_prompt}</p>
             </article>
           ))}
@@ -117,24 +145,82 @@ export function TeamChatView({
 
         <div className="team-run-panel" aria-label="Team run timeline">
           <div className="team-run-header">
-            <h3>Run timeline</h3>
+            <h3>Run activity</h3>
           </div>
-          <div className="team-run-timeline" aria-live="polite">
+          <div className="team-run-content" aria-live="polite">
             {items.length === 0 ? (
               <p className="conversation-empty">No team runs yet.</p>
             ) : (
-              items.map((item) => (
-                <article className={`team-run-event team-run-event-${item.kind}`} key={item.item_id}>
-                  <div className="team-run-event-head">
-                    <span>{item.label}</span>
-                    <time dateTime={new Date(item.create_time).toISOString()}>
-                      {new Date(item.create_time).toLocaleTimeString()}
-                    </time>
+              <>
+                <section className="team-activity-stream" aria-label="Activity stream">
+                  <div className="team-section-title">
+                    <h4>Activity</h4>
+                    <span>{activityItems.length}</span>
                   </div>
-                  <p>{item.text}</p>
-                  {item.status && <span className="team-run-event-status">{item.status}</span>}
-                </article>
-              ))
+                  <div className="team-run-timeline">
+                    {activityItems.map((item) => (
+                      <article className={`team-run-event team-run-event-${item.kind}`} key={item.item_id}>
+                        <div className="team-run-event-head">
+                          <span>{item.label}</span>
+                          <time dateTime={new Date(item.create_time).toISOString()}>
+                            {new Date(item.create_time).toLocaleTimeString()}
+                          </time>
+                        </div>
+                        <p>{decorateActivityText(item, memberById.get(item.member_id ?? '')?.role)}</p>
+                        <div className="team-run-event-meta">
+                          {item.status && <span className="team-run-event-status">{item.status}</span>}
+                          {item.delivery_id && <span className="team-run-event-status">delivery {shortId(item.delivery_id)}</span>}
+                          {item.attempt_id && <span className="team-run-event-status">attempt {shortId(item.attempt_id)}</span>}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="team-delivery-streams" aria-label="Delivery streams">
+                  <div className="team-section-title">
+                    <h4>Delivery streams</h4>
+                    <span>{deliveryItems.length}</span>
+                  </div>
+                  <div className="team-delivery-list">
+                    {deliveryItems.map((item) => {
+                      const member = memberById.get(item.member_id ?? '');
+                      const isRunning = item.status === 'running';
+                      return (
+                        <details
+                          className={`team-delivery-card team-delivery-card-${item.status ?? 'unknown'}`}
+                          key={item.item_id}
+                          open={isRunning}
+                        >
+                          <summary>
+                            <span className="team-delivery-summary-main">
+                              <span>{item.label}</span>
+                              <span>{member?.role ?? 'Unknown member'}</span>
+                            </span>
+                            <span className="team-delivery-summary-meta">
+                              {item.status ?? 'unknown'}
+                              {item.delivery_id ? ` · delivery ${shortId(item.delivery_id)}` : ''}
+                              {item.attempt_id ? ` · attempt ${shortId(item.attempt_id)}` : ''}
+                            </span>
+                          </summary>
+                          <div className="team-delivery-detail">
+                            <p className="team-delivery-detail-meta">
+                              <time dateTime={new Date(item.create_time).toISOString()}>
+                                {new Date(item.create_time).toLocaleTimeString()}
+                              </time>
+                            </p>
+                            {item.text.trim() ? (
+                              <pre>{item.text}</pre>
+                            ) : (
+                              <p className="team-delivery-empty">{deliveryStatusText(item.status)}</p>
+                            )}
+                          </div>
+                        </details>
+                      );
+                    })}
+                  </div>
+                </section>
+              </>
             )}
           </div>
         </div>
@@ -177,6 +263,25 @@ export function TeamChatView({
       </form>
     </section>
   );
+}
+
+function decorateActivityText(item: TeamTimelineItem, memberRole: string | undefined): string {
+  if (item.kind !== 'delivery_activity') return item.text;
+  return memberRole ? `${memberRole}: ${item.text}` : item.text;
+}
+
+function deliveryStatusText(status: string | undefined): string {
+  if (status === 'blocked') return 'Blocked.';
+  if (status === 'pending') return 'Queued.';
+  if (status === 'running') return 'Running.';
+  if (status === 'done') return 'Completed.';
+  if (status === 'failed') return 'Failed.';
+  if (status === 'cancelled') return 'Cancelled.';
+  return 'Waiting.';
+}
+
+function shortId(id: string): string {
+  return id.length <= 8 ? id : id.slice(0, 8);
 }
 
 function TeamIcon() {

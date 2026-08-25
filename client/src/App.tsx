@@ -54,6 +54,28 @@ function teamMessageTimelineMeta(kind: string): Pick<TeamTimelineItem, 'kind' | 
   return null;
 }
 
+function deliveryStreamLabel(messageId: string, rootMessageId: string): string {
+  return messageId === rootMessageId ? 'Leader response' : 'Delivery';
+}
+
+function deliveryActivityText(status: string): string {
+  if (status === 'blocked') return 'Blocked by dependency.';
+  if (status === 'pending') return 'Queued.';
+  if (status === 'running') return 'Running.';
+  if (status === 'done') return 'Done.';
+  if (status === 'failed') return 'Failed.';
+  if (status === 'cancelled') return 'Cancelled.';
+  return status;
+}
+
+function deliveryActivityTime(delivery: TeamRunWithItems['deliveries'][number]): number {
+  if (delivery.status === 'running') return delivery.started_at ?? delivery.created_at;
+  if (delivery.status === 'done' || delivery.status === 'failed' || delivery.status === 'cancelled') {
+    return delivery.finished_at ?? delivery.started_at ?? delivery.created_at;
+  }
+  return delivery.created_at;
+}
+
 function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
   const items: TeamTimelineItem[] = [];
   for (const run of runs) {
@@ -96,6 +118,8 @@ function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
           label: 'Assignment',
           text: message.content,
           status: run.deliveries.find((delivery) => delivery.message_id === message.message_id)?.status,
+          member_id: run.deliveries.find((delivery) => delivery.message_id === message.message_id)?.to_member_id,
+          delivery_id: run.deliveries.find((delivery) => delivery.message_id === message.message_id)?.delivery_id,
           create_time: message.create_time,
         });
       } else if (message.kind === 'error') {
@@ -106,37 +130,51 @@ function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
           label: message.from_kind === 'member' ? 'Member error' : 'Run error',
           text: message.content,
           status: 'failed',
+          member_id: message.from_member_id,
           create_time: message.create_time,
         });
       } else {
         const meta = teamMessageTimelineMeta(message.kind);
         if (meta) {
+          const delivery = run.deliveries.find((item) => item.message_id === message.message_id);
           items.push({
             item_id: `message:${message.message_id}`,
             run_id: run.run.run_id,
             kind: meta.kind,
             label: meta.label,
             text: message.content,
-            status: run.deliveries.find((delivery) => delivery.message_id === message.message_id)?.status,
+            status: delivery?.status,
+            member_id: message.from_member_id ?? delivery?.to_member_id,
+            delivery_id: delivery?.delivery_id,
             create_time: message.create_time,
           });
         }
       }
     }
 
-    const hasTerminalMessage = run.messages.some((message) => message.kind === 'final' || message.kind === 'error');
     for (const delivery of run.deliveries) {
-      if (delivery.status !== 'done' || !hasTerminalMessage) {
-        items.push({
-          item_id: `delivery:${delivery.delivery_id}:stream`,
-          run_id: run.run.run_id,
-          kind: 'leader_response',
-          label: delivery.message_id === run.run.root_user_message_id ? 'Leader response' : 'Delivery',
-          text: delivery.status === 'done' ? 'Completed.' : '',
-          status: delivery.status,
-          create_time: delivery.started_at ?? delivery.created_at,
-        });
-      }
+      items.push({
+        item_id: `delivery:${delivery.delivery_id}:stream`,
+        run_id: run.run.run_id,
+        kind: 'delivery_stream',
+        label: deliveryStreamLabel(delivery.message_id, run.run.root_user_message_id),
+        text: delivery.status === 'done' ? 'Completed.' : '',
+        status: delivery.status,
+        member_id: delivery.to_member_id,
+        delivery_id: delivery.delivery_id,
+        create_time: delivery.started_at ?? delivery.created_at,
+      });
+      items.push({
+        item_id: `delivery:${delivery.delivery_id}:activity:${delivery.status}`,
+        run_id: run.run.run_id,
+        kind: 'delivery_activity',
+        label: 'Delivery status',
+        text: deliveryActivityText(delivery.status),
+        status: delivery.status,
+        member_id: delivery.to_member_id,
+        delivery_id: delivery.delivery_id,
+        create_time: deliveryActivityTime(delivery),
+      });
     }
   }
   return items.sort((a, b) => a.create_time - b.create_time);
@@ -296,15 +334,30 @@ export function App() {
             });
             return {
               ...prev,
-              [event.team_id]: putTimelineItem(withUser, {
-                item_id: `delivery:${event.delivery.delivery_id}:stream`,
-                run_id: event.run.run_id,
-                kind: 'leader_response',
-                label: 'Leader response',
-                text: '',
-                status: event.delivery.status,
-                create_time: event.delivery.created_at,
-              }),
+              [event.team_id]: putTimelineItem(
+                putTimelineItem(withUser, {
+                  item_id: `delivery:${event.delivery.delivery_id}:stream`,
+                  run_id: event.run.run_id,
+                  kind: 'delivery_stream',
+                  label: 'Leader response',
+                  text: '',
+                  status: event.delivery.status,
+                  member_id: event.delivery.to_member_id,
+                  delivery_id: event.delivery.delivery_id,
+                  create_time: event.delivery.created_at,
+                }),
+                {
+                  item_id: `delivery:${event.delivery.delivery_id}:activity:${event.delivery.status}`,
+                  run_id: event.run.run_id,
+                  kind: 'delivery_activity',
+                  label: 'Delivery status',
+                  text: deliveryActivityText(event.delivery.status),
+                  status: event.delivery.status,
+                  member_id: event.delivery.to_member_id,
+                  delivery_id: event.delivery.delivery_id,
+                  create_time: event.delivery.created_at,
+                },
+              ),
             };
           });
           setTeams((prev) =>
@@ -312,18 +365,35 @@ export function App() {
           );
           break;
         case 'team_delivery_status_change':
-          setTeamTimeline((prev) => ({
-            ...prev,
-            [event.team_id]: putTimelineItem(prev[event.team_id] ?? [], {
-              item_id: `delivery:${event.delivery_id}:stream`,
+          setTeamTimeline((prev) => {
+            const itemId = `delivery:${event.delivery_id}:stream`;
+            const existing = prev[event.team_id]?.find((item) => item.item_id === itemId);
+            const items = putTimelineItem(prev[event.team_id] ?? [], {
+              item_id: itemId,
               run_id: event.run_id,
-              kind: 'leader_response',
-              label: prev[event.team_id]?.find((item) => item.item_id === `delivery:${event.delivery_id}:stream`)?.label ?? 'Delivery',
-              text: prev[event.team_id]?.find((item) => item.item_id === `delivery:${event.delivery_id}:stream`)?.text ?? '',
+              kind: 'delivery_stream',
+              label: existing?.label ?? 'Delivery',
+              text: existing?.text ?? '',
               status: event.status,
-              create_time: Date.now(),
-            }),
-          }));
+              member_id: event.member_id,
+              delivery_id: event.delivery_id,
+              create_time: existing?.create_time ?? Date.now(),
+            });
+            return {
+              ...prev,
+              [event.team_id]: putTimelineItem(items, {
+                item_id: `delivery:${event.delivery_id}:activity:${event.status}`,
+                run_id: event.run_id,
+                kind: 'delivery_activity',
+                label: 'Delivery status',
+                text: deliveryActivityText(event.status),
+                status: event.status,
+                member_id: event.member_id,
+                delivery_id: event.delivery_id,
+                create_time: Date.now(),
+              }),
+            };
+          });
           setTeams((prev) =>
             prev.map((team) =>
               team.team_id === event.team_id
@@ -354,10 +424,12 @@ export function App() {
               [event.team_id]: putTimelineItem(prev[event.team_id] ?? [], {
                 item_id: itemId,
                 run_id: event.run_id,
-                kind: 'leader_response',
+                kind: 'delivery_stream',
                 label: existing?.label ?? 'Leader response',
                 text: `${existing?.text ?? ''}${event.text}`,
                 status: existing?.status ?? 'running',
+                member_id: event.member_id,
+                delivery_id: event.delivery_id,
                 create_time: existing?.create_time ?? Date.now(),
               }),
             };
@@ -391,13 +463,16 @@ export function App() {
               create_time: event.plan_message.create_time,
             });
             for (const message of event.assignment_messages) {
+              const delivery = event.deliveries.find((item) => item.message_id === message.message_id);
               items = putTimelineItem(items, {
                 item_id: `message:${message.message_id}`,
                 run_id: event.run.run_id,
                 kind: 'assignment',
                 label: 'Assignment',
                 text: message.content,
-                status: event.deliveries.find((delivery) => delivery.message_id === message.message_id)?.status,
+                status: delivery?.status,
+                member_id: delivery?.to_member_id,
+                delivery_id: delivery?.delivery_id,
                 create_time: message.create_time,
               });
             }
@@ -405,10 +480,23 @@ export function App() {
               items = putTimelineItem(items, {
                 item_id: `delivery:${delivery.delivery_id}:stream`,
                 run_id: event.run.run_id,
-                kind: 'leader_response',
+                kind: 'delivery_stream',
                 label: 'Delivery',
                 text: '',
                 status: delivery.status,
+                member_id: delivery.to_member_id,
+                delivery_id: delivery.delivery_id,
+                create_time: delivery.created_at,
+              });
+              items = putTimelineItem(items, {
+                item_id: `delivery:${delivery.delivery_id}:activity:${delivery.status}`,
+                run_id: event.run.run_id,
+                kind: 'delivery_activity',
+                label: 'Delivery status',
+                text: deliveryActivityText(delivery.status),
+                status: delivery.status,
+                member_id: delivery.to_member_id,
+                delivery_id: delivery.delivery_id,
                 create_time: delivery.created_at,
               });
             }
@@ -429,6 +517,8 @@ export function App() {
                 label: meta?.label ?? 'Member error',
                 text: event.message.content,
                 status: event.delivery?.status,
+                member_id: event.message.from_member_id ?? event.delivery?.to_member_id,
+                delivery_id: event.delivery?.delivery_id,
                 create_time: event.message.create_time,
               });
             }
@@ -436,10 +526,23 @@ export function App() {
               items = putTimelineItem(items, {
                 item_id: `delivery:${event.delivery.delivery_id}:stream`,
                 run_id: event.delivery.run_id,
-                kind: 'leader_response',
+                kind: 'delivery_stream',
                 label: 'Leader follow-up',
                 text: '',
                 status: event.delivery.status,
+                member_id: event.delivery.to_member_id,
+                delivery_id: event.delivery.delivery_id,
+                create_time: event.delivery.created_at,
+              });
+              items = putTimelineItem(items, {
+                item_id: `delivery:${event.delivery.delivery_id}:activity:${event.delivery.status}`,
+                run_id: event.delivery.run_id,
+                kind: 'delivery_activity',
+                label: 'Delivery status',
+                text: deliveryActivityText(event.delivery.status),
+                status: event.delivery.status,
+                member_id: event.delivery.to_member_id,
+                delivery_id: event.delivery.delivery_id,
                 create_time: event.delivery.created_at,
               });
             }
@@ -457,6 +560,7 @@ export function App() {
               label: 'Run error',
               text: event.error_message.content,
               status: event.run.status,
+              member_id: event.error_message.from_member_id,
               create_time: event.error_message.create_time,
             }),
           }));

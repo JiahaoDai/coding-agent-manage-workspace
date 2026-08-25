@@ -4,10 +4,10 @@
 
 **Blocked by:** 05: Execute worker deliveries with global sequential scheduling.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Stream events are grouped by run, member, delivery, and attempt when available.
-- [ ] A running delivery can be expanded to show live output without mixing it with another delivery.
-- [ ] Completed deliveries show concise summaries by default and detailed process output when expanded.
-- [ ] The activity stream shows planning, queued, blocked, running, done, failed, and finalization events.
-- [ ] Tests cover stream grouping, expandable delivery details, and activity ordering.
+- [x] Stream events are grouped by run, member, delivery, and attempt when available.
+- [x] A running delivery can be expanded to show live output without mixing it with another delivery.
+- [x] Completed deliveries show concise summaries by default and detailed process output when expanded.
+- [x] The activity stream shows planning, queued, blocked, running, done, failed, and finalization events.
+- [x] Tests cover stream grouping, expandable delivery details, and activity ordering.

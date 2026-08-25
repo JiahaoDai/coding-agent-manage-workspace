@@ -1143,6 +1143,13 @@ button {
   white-space: nowrap;
 }
 
+.team-member-active {
+  margin: 8px 0 0;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
 .team-chat {
   display: flex;
   flex-direction: column;
@@ -1228,13 +1235,55 @@ button {
   font-weight: 600;
 }
 
+.team-run-content {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.42fr) minmax(0, 0.58fr);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.team-activity-stream,
+.team-delivery-streams {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.team-activity-stream {
+  border-right: 1px solid var(--border);
+}
+
+.team-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.team-section-title h4 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.team-section-title span {
+  font-size: 0.75rem;
+}
+
 .team-run-timeline {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
   min-height: 0;
-  padding: 20px;
+  padding: 14px;
   overflow-y: auto;
 }
 
@@ -1242,8 +1291,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-width: 760px;
-  padding: 14px;
+  padding: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-surface);
@@ -1260,6 +1308,10 @@ button {
 
 .team-run-event-error {
   border-color: rgba(239, 68, 68, 0.45);
+}
+
+.team-run-event-delivery_activity {
+  background: var(--bg);
 }
 
 .team-run-event-head {
@@ -1282,6 +1334,12 @@ button {
   overflow-wrap: anywhere;
 }
 
+.team-run-event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .team-run-event-status {
   align-self: flex-start;
   padding: 3px 8px;
@@ -1289,6 +1347,94 @@ button {
   background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 0.75rem;
+}
+
+.team-delivery-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 14px;
+  overflow-y: auto;
+}
+
+.team-delivery-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+
+.team-delivery-card-running {
+  border-color: rgba(16, 163, 127, 0.4);
+}
+
+.team-delivery-card-failed {
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+.team-delivery-card summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.team-delivery-summary-main,
+.team-delivery-summary-meta {
+  min-width: 0;
+}
+
+.team-delivery-summary-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--text-primary);
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.team-delivery-summary-main span + span,
+.team-delivery-summary-meta,
+.team-delivery-detail-meta,
+.team-delivery-empty {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+.team-delivery-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.team-delivery-detail-meta {
+  margin: 0;
+}
+
+.team-delivery-detail pre {
+  max-height: 360px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.team-delivery-empty {
+  margin: 0;
 }
 
 .team-composer {
@@ -1314,6 +1460,16 @@ button {
 
   .team-run-panel {
     min-height: 360px;
+  }
+
+  .team-run-content {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .team-activity-stream {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
   }
 
   .team-chat-header {

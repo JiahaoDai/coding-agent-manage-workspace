@@ -572,11 +572,17 @@ async function runLeaderOnlyDelivery({
       output.push(delta);
       broadcastLeaderText(delta);
     },
-    onToolCallStart: () => {},
-    onToolCallEnd: () => {},
-    onThinkingDelta: () => {},
+    onToolCallStart: (tool_call_id, name, input) => {
+      broadcastLeaderText(teamProcessLine('tool start', `${name} ${tool_call_id} ${formatTeamToolInput(input)}`));
+    },
+    onToolCallEnd: (tool_call_id) => {
+      broadcastLeaderText(teamProcessLine('tool end', tool_call_id));
+    },
+    onThinkingDelta: (delta) => {
+      broadcastLeaderText(teamProcessLine('thinking', delta));
+    },
     onStatusNote: (note) => {
-      broadcastLeaderText(note);
+      broadcastLeaderText(teamProcessLine('status', note));
     },
     onStatusChange: (status) => {
       const current = deps.store.get(session.session_id);
@@ -899,11 +905,17 @@ async function runClaimedLeaderFollowUpDelivery({
       output.push(delta);
       broadcastLeaderText(delta);
     },
-    onToolCallStart: () => {},
-    onToolCallEnd: () => {},
-    onThinkingDelta: () => {},
+    onToolCallStart: (tool_call_id, name, input) => {
+      broadcastLeaderText(teamProcessLine('tool start', `${name} ${tool_call_id} ${formatTeamToolInput(input)}`));
+    },
+    onToolCallEnd: (tool_call_id) => {
+      broadcastLeaderText(teamProcessLine('tool end', tool_call_id));
+    },
+    onThinkingDelta: (delta) => {
+      broadcastLeaderText(teamProcessLine('thinking', delta));
+    },
     onStatusNote: (note) => {
-      broadcastLeaderText(note);
+      broadcastLeaderText(teamProcessLine('status', note));
     },
     onStatusChange: (status) => {
       const current = deps.store.get(session.session_id);
@@ -1106,9 +1118,36 @@ async function runClaimedTeamDelivery({
         text: delta,
       });
     },
-    onToolCallStart: () => {},
-    onToolCallEnd: () => {},
-    onThinkingDelta: () => {},
+    onToolCallStart: (tool_call_id, name, input) => {
+      deps.sse.broadcast({
+        type: 'team_text_delta',
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        delivery_id: delivery.delivery_id,
+        member_id: member.member_id,
+        text: teamProcessLine('tool start', `${name} ${tool_call_id} ${formatTeamToolInput(input)}`),
+      });
+    },
+    onToolCallEnd: (tool_call_id) => {
+      deps.sse.broadcast({
+        type: 'team_text_delta',
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        delivery_id: delivery.delivery_id,
+        member_id: member.member_id,
+        text: teamProcessLine('tool end', tool_call_id),
+      });
+    },
+    onThinkingDelta: (delta) => {
+      deps.sse.broadcast({
+        type: 'team_text_delta',
+        team_id: delivery.team_id,
+        run_id: delivery.run_id,
+        delivery_id: delivery.delivery_id,
+        member_id: member.member_id,
+        text: teamProcessLine('thinking', delta),
+      });
+    },
     onStatusNote: (note) => {
       output.push(note);
       deps.sse.broadcast({
@@ -1117,7 +1156,7 @@ async function runClaimedTeamDelivery({
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
         member_id: member.member_id,
-        text: note,
+        text: teamProcessLine('status', note),
       });
     },
     onStatusChange: (status) => {
@@ -1264,6 +1303,18 @@ function memberInitializationPrompt(member: TeamMemberInput): string {
     '- PROPOSAL: ...',
     '- FAILED: ...',
   ].join('\n');
+}
+
+function teamProcessLine(label: string, text: string): string {
+  return `\n[${label}] ${text}\n`;
+}
+
+function formatTeamToolInput(input: unknown): string {
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return String(input);
+  }
 }
 
 function leaderOnlyPrompt({
