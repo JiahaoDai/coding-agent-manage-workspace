@@ -159,8 +159,10 @@ export interface OpencodeEventState {
  */
 export interface OpenCodeRuntime {
   createClient(config: { baseUrl: string; throwOnError: true }): OpencodeClient;
-  createServer(options?: { config: { model: string } }): Promise<{ url: string; close(): void }>;
+  createServer(options?: { port?: number; config?: { model: string } }): Promise<{ url: string; close(): void }>;
 }
+
+const DEFAULT_OPENCODE_SERVER_PORT = 9999;
 
 export function createOpencodeSdk(
   config: { model?: string } = {},
@@ -181,7 +183,10 @@ export function createOpencodeSdk(
     clientPromise ??= (async () => {
       const url = process.env.OPENCODE_URL;
       if (url) return runtime.createClient({ baseUrl: url, throwOnError: true });
-      ownedServer = await runtime.createServer(model ? { config: { model } } : undefined);
+      ownedServer = await runtime.createServer({
+        port: DEFAULT_OPENCODE_SERVER_PORT,
+        ...(model ? { config: { model } } : {}),
+      });
       return runtime.createClient({ baseUrl: ownedServer.url, throwOnError: true });
     })();
     try {

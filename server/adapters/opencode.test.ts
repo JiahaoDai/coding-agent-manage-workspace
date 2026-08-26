@@ -277,6 +277,7 @@ describe('OpenCodeAdapter', () => {
     const first = sdk.listModels!('/project');
     const second = sdk.listModels!('/project');
     expect(createServer).toHaveBeenCalledTimes(1);
+    expect(createServer).toHaveBeenCalledWith({ port: 9999 });
     resolveServer({ url: 'http://127.0.0.1:9999', close() {} });
     await expect(Promise.all([first, second])).resolves.toEqual([[], []]);
   });
