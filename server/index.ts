@@ -35,6 +35,42 @@ adapters.register('pi', new PiAdapter(createPiSdk({ model: process.env.PI_MODEL 
 const sse = new SseHub();
 const app = createApp({ store, adapters, sse, fs: createFsTree() });
 
-serve({ fetch: app.fetch, port: PORT }, (info) => {
+const server = serve({ fetch: app.fetch, port: PORT }, (info) => {
   console.log(`coding-agent-dashboard server listening on http://localhost:${info.port}`);
 });
+
+let closing = false;
+async function closeResources(): Promise<void> {
+  if (closing) return;
+  closing = true;
+  await adapters.closeAll();
+}
+
+type CloseableServer = typeof server & {
+  on?(event: 'close', listener: () => void): void;
+  close?(callback?: (err?: Error) => void): void;
+};
+
+const closeableServer = server as CloseableServer;
+closeableServer.on?.('close', () => {
+  void closeResources();
+});
+
+function shutdown(signal: NodeJS.Signals): void {
+  void (async () => {
+    console.log(`Received ${signal}; shutting down coding-agent-dashboard server.`);
+    await closeResources();
+    await new Promise<void>((resolve) => {
+      closeableServer.close?.(() => resolve());
+      if (!closeableServer.close) resolve();
+    });
+    db.close();
+    process.exit(0);
+  })().catch((err) => {
+    console.error('Failed during shutdown', err);
+    process.exit(1);
+  });
+}
+
+process.once('SIGINT', shutdown);
+process.once('SIGTERM', shutdown);

@@ -280,6 +280,29 @@ describe('OpenCodeAdapter', () => {
     resolveServer({ url: 'http://127.0.0.1:9999', close() {} });
     await expect(Promise.all([first, second])).resolves.toEqual([[], []]);
   });
+
+  it('closes the OpenCode server it spawned', async () => {
+    const previousUrl = process.env.OPENCODE_URL;
+    delete process.env.OPENCODE_URL;
+    const close = vi.fn();
+    const runtime: OpenCodeRuntime = {
+      createServer: vi.fn(async () => ({ url: 'http://127.0.0.1:9999', close })),
+      createClient: vi.fn(() => ({ config: { providers: vi.fn(async () => ({ data: { providers: [] } })) } }) as never),
+    };
+    const sdk = createOpencodeSdk({}, runtime);
+
+    try {
+      await sdk.listModels!('/project');
+      await sdk.close?.();
+      await sdk.close?.();
+    } finally {
+      if (previousUrl === undefined) delete process.env.OPENCODE_URL;
+      else process.env.OPENCODE_URL = previousUrl;
+    }
+
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it('createSession returns the native session id', async () => {
     const adapter = new OpenCodeAdapter(makeSdk().sdk);
     expect(await adapter.createSession('/tmp/p', { name: 'fix auth' })).toEqual({

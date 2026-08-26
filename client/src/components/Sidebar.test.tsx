@@ -35,6 +35,7 @@ const team: TeamWithMembers = {
       responsibility_prompt: 'Lead the team.',
       status: 'idle',
       current_delivery_id: null,
+      initialized_at: null,
       create_time: 1,
       modify_time: 1,
     },

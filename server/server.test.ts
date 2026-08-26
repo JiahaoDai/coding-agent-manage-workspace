@@ -284,10 +284,6 @@ describe('walking skeleton', () => {
       const first = await startServer({ dbPath });
       try {
         first.fake.promptScript = (handlers, ctx) => {
-          if (ctx.input.includes('You are ')) {
-            handlers.onStatusChange('completed');
-            return;
-          }
           if (ctx.input.includes('User request:')) {
             handlers.onTextDelta(JSON.stringify({
               type: 'plan',
@@ -444,10 +440,9 @@ describe('walking skeleton', () => {
 });
 
 describe('agent teams (v3 ticket #1)', () => {
-  it('creates a team with fresh member sessions and sends each initialization prompt once', async () => {
+  it('creates a team with fresh member sessions without prompting agents during creation', async () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {
-      fake.promptScript = (handlers) => handlers.onStatusChange('completed');
       const res = await post(baseUrl, '/api/teams', {
         name: 'Product Builder',
         cwd: '/tmp/team-project',
@@ -480,11 +475,7 @@ describe('agent teams (v3 ticket #1)', () => {
 
       const sessions = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
       expect(sessions.filter((session) => session.cwd === '/tmp/team-project')).toHaveLength(0);
-      expect(fake.promptCalls).toHaveLength(2);
-      expect(fake.promptCalls[0].input).toContain('You are leader in an agent team.');
-      expect(fake.promptCalls[0].input).toContain('Lead the team and produce final answers.');
-      expect(fake.promptCalls[1].input).toContain('You are docs-writer in an agent team.');
-      expect(fake.promptCalls[1].input).toContain('Write user-facing docs for completed team work.');
+      expect(fake.promptCalls).toHaveLength(0);
       expect(fake.modelSetCalls).toEqual([{ real_session_id: 'native-/tmp/team-project-2', model_id: 'fake/fast' }]);
 
       const listed = await (await fetch(`${baseUrl}/api/teams`)).json() as Array<{ team_id: string; members: unknown[] }>;
@@ -501,7 +492,7 @@ describe('agent teams (v3 ticket #1)', () => {
     }
   });
 
-  it('fails team creation when initialization asks for tool permission', async () => {
+  it('defers initialization prompts until the member receives a delivery', async () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {
       fake.promptScript = async (handlers) => {
@@ -509,7 +500,7 @@ describe('agent teams (v3 ticket #1)', () => {
       };
 
       const res = await post(baseUrl, '/api/teams', {
-        name: 'Unsafe Init',
+        name: 'Deferred Init',
         cwd: '/tmp/team-project',
         members: [
           {
@@ -521,11 +512,9 @@ describe('agent teams (v3 ticket #1)', () => {
         ],
       });
 
-      expect(res.status).toBe(422);
-      expect(await res.json()).toEqual({
-        error: 'team member initialization for leader requested permission for Bash',
-      });
-      expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toEqual([]);
+      expect(res.status).toBe(201);
+      expect(fake.promptCalls).toHaveLength(0);
+      expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toHaveLength(1);
     } finally {
       server.close();
       db.close();
@@ -637,7 +626,7 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
         team_id: string;
         members: Array<{ member_id: string; session_id: string }>;
       };
-      expect(fake.promptCalls).toHaveLength(1);
+      expect(fake.promptCalls).toHaveLength(0);
 
       const sseRes = await fetch(`${baseUrl}/api/events`);
       const reader = sseRes.body!.getReader();
@@ -680,15 +669,16 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
       expect(completed!.final_message.content).toBe('Leader handled the request.');
       expect(completed!.run.status).toBe('completed');
 
-      expect(fake.promptCalls).toHaveLength(2);
-      expect(fake.promptCalls[1]).toMatchObject({
+      expect(fake.promptCalls).toHaveLength(1);
+      expect(fake.promptCalls[0]).toMatchObject({
         real_session_id: 'native-/tmp/team-project',
         cwd: '/tmp/team-project',
       });
-      expect(fake.promptCalls[1].input).toContain('User request:');
-      expect(fake.promptCalls[1].input).toContain('Build the settings page.');
-      expect(fake.promptCalls[1].input).not.toContain('Collaboration rules:');
-      expect(fake.promptCalls[1].input).not.toContain('You are leader in an agent team.');
+      expect(fake.promptCalls[0].input).toContain('User request:');
+      expect(fake.promptCalls[0].input).toContain('Build the settings page.');
+      expect(fake.promptCalls[0].input).toContain('Member initialization (first delivery only):');
+      expect(fake.promptCalls[0].input).toContain('You are leader in an agent team.');
+      expect(fake.promptCalls[0].input).toContain('Lead the team and produce final answers.');
 
       const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
         run: { status: string };
@@ -722,10 +712,6 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {
       fake.promptScript = async (handlers, ctx) => {
-        if (ctx.input.includes('You are ')) {
-          handlers.onStatusChange('completed');
-          return;
-        }
         if (ctx.input.includes('User request:')) {
           handlers.onTextDelta(JSON.stringify({
             type: 'plan',
@@ -881,10 +867,6 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {
       fake.promptScript = (handlers, ctx) => {
-        if (ctx.input.includes('You are ')) {
-          handlers.onStatusChange('completed');
-          return;
-        }
         if (ctx.input.includes('User request:')) {
           handlers.onTextDelta(JSON.stringify({
             type: 'need_user_input',
@@ -1254,10 +1236,15 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
       expect(workerPrompts[2]).toContain('Task: Review the API implementation.');
       expect(workerPrompts[2]).toContain('Dependency summaries:');
       expect(workerPrompts[2]).toContain('requires success, status=done');
+      expect(workerPrompts[0]).toContain('Member initialization (first delivery only):');
+      expect(workerPrompts[0]).toContain('You are backend-coder in an agent team.');
+      expect(workerPrompts[0]).toContain('Implement backend tasks.');
+      expect(workerPrompts[1]).not.toContain('Member initialization (first delivery only):');
+      expect(workerPrompts[1]).not.toContain('You are backend-coder in an agent team.');
+      expect(workerPrompts[2]).toContain('Member initialization (first delivery only):');
+      expect(workerPrompts[2]).toContain('You are reviewer in an agent team.');
+      expect(workerPrompts[2]).toContain('Review completed work.');
       for (const prompt of workerPrompts) {
-        expect(prompt).not.toContain('You are backend-coder in an agent team.');
-        expect(prompt).not.toContain('You are reviewer in an agent team.');
-        expect(prompt).not.toContain('Collaboration rules:');
         expect(prompt).not.toContain('Leader responsibility:');
       }
 

@@ -594,10 +594,9 @@ async function runLeaderOnlyDelivery({
       text,
       stream_kind,
       stream_label,
-    });
+  });
 
   deps.store.updateTeamMemberStatus(leader.member_id, 'running', delivery_id);
-  if (leader.initialized_at === null) deps.store.markTeamMemberInitialized(leader.member_id);
   deps.store.updateStatus(session.session_id, 'running');
   deps.sse.broadcast({
     type: 'team_delivery_status_change',
@@ -651,10 +650,12 @@ async function runLeaderOnlyDelivery({
   };
 
   try {
+    const includeInitialization = leader.initialized_at === null;
+    const activeLeader = includeInitialization ? deps.store.markTeamMemberInitialized(leader.member_id) ?? leader : leader;
     await adapter.prompt(
       session.real_session_id,
       cwd,
-      leaderOnlyPrompt({ team_name, leader, text, members: team_members }),
+      leaderOnlyPrompt({ team_name, leader: activeLeader, includeInitialization, text, members: team_members }),
       handlers,
     );
 
@@ -1040,8 +1041,8 @@ async function runClaimedLeaderFollowUpDelivery({
 
   deps.store.updateStatus(session.session_id, 'running');
   deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
-  const includeInitialization = member.initialized_at === null;
-  const activeMember = includeInitialization ? deps.store.markTeamMemberInitialized(member.member_id) ?? member : member;
+  const includeInitialization = leader.initialized_at === null;
+  const activeLeader = includeInitialization ? deps.store.markTeamMemberInitialized(leader.member_id) ?? leader : leader;
 
   const handlers: PromptHandlers = {
     onTextDelta: (delta) => {
@@ -1090,7 +1091,8 @@ async function runClaimedLeaderFollowUpDelivery({
       session.cwd,
       leaderFollowUpPrompt({
         team_name: team?.name ?? delivery.team_id,
-        leader,
+        leader: activeLeader,
+        includeInitialization,
         message,
         members: team?.members ?? [leader],
         runItems,
@@ -1308,7 +1310,8 @@ async function runClaimedTeamDelivery({
 
   deps.store.updateStatus(session.session_id, 'running');
   deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
-  if (leader.initialized_at === null) deps.store.markTeamMemberInitialized(leader.member_id);
+  const includeInitialization = member.initialized_at === null;
+  const activeMember = includeInitialization ? deps.store.markTeamMemberInitialized(member.member_id) ?? member : member;
 
   const handlers: PromptHandlers = {
     onTextDelta: (delta) => {
@@ -1649,11 +1652,13 @@ function teamPermissionContext({
 function leaderOnlyPrompt({
   team_name,
   leader,
+  includeInitialization,
   text,
   members,
 }: {
   team_name: string;
   leader: TeamMemberRecord;
+  includeInitialization: boolean;
   text: string;
   members: TeamWithMembers['members'];
 }): string {
@@ -1664,6 +1669,9 @@ function leaderOnlyPrompt({
   });
 
   return [
+    includeInitialization ? 'Member initialization (first delivery only):' : '',
+    includeInitialization ? memberInitializationPrompt(leader) : '',
+    includeInitialization ? '' : '',
     `Team: ${team_name}`,
     `Delivery target: ${leader.role}`,
     '',
@@ -1700,12 +1708,14 @@ function leaderOnlyPrompt({
 function leaderFollowUpPrompt({
   team_name,
   leader,
+  includeInitialization,
   message,
   members,
   runItems,
 }: {
   team_name: string;
   leader: TeamMemberRecord;
+  includeInitialization: boolean;
   message: TeamMessageRecord;
   members: TeamWithMembers['members'];
   runItems: TeamRunWithItems | undefined;
@@ -1725,6 +1735,9 @@ function leaderFollowUpPrompt({
     });
 
   return [
+    includeInitialization ? 'Member initialization (first delivery only):' : '',
+    includeInitialization ? memberInitializationPrompt(leader) : '',
+    includeInitialization ? '' : '',
     `Team: ${team_name}`,
     `Delivery target: ${leader.role}`,
     '',
