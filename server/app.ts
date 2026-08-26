@@ -216,8 +216,6 @@ export function createApp(deps: AppDeps): Hono {
           if (!selected.supported) return c.json({ error: `model selection failed for member ${member.role}: ${selected.reason}` }, 409);
         }
 
-        await adapter.prompt(real_session_id, cwd, memberInitializationPrompt(member), initializationHandlers(member.role));
-
         sessions.push({
           session_id,
           coding_agent: member.agent,
@@ -240,6 +238,7 @@ export function createApp(deps: AppDeps): Hono {
           responsibility_prompt: member.responsibility_prompt,
           status: 'idle',
           current_delivery_id: null,
+          initialized_at: null,
           create_time: now + teamMembers.length,
           modify_time: now + teamMembers.length,
         });
@@ -598,6 +597,7 @@ async function runLeaderOnlyDelivery({
     });
 
   deps.store.updateTeamMemberStatus(leader.member_id, 'running', delivery_id);
+  if (leader.initialized_at === null) deps.store.markTeamMemberInitialized(leader.member_id);
   deps.store.updateStatus(session.session_id, 'running');
   deps.sse.broadcast({
     type: 'team_delivery_status_change',
@@ -1040,6 +1040,8 @@ async function runClaimedLeaderFollowUpDelivery({
 
   deps.store.updateStatus(session.session_id, 'running');
   deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
+  const includeInitialization = member.initialized_at === null;
+  const activeMember = includeInitialization ? deps.store.markTeamMemberInitialized(member.member_id) ?? member : member;
 
   const handlers: PromptHandlers = {
     onTextDelta: (delta) => {
@@ -1306,6 +1308,7 @@ async function runClaimedTeamDelivery({
 
   deps.store.updateStatus(session.session_id, 'running');
   deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
+  if (leader.initialized_at === null) deps.store.markTeamMemberInitialized(leader.member_id);
 
   const handlers: PromptHandlers = {
     onTextDelta: (delta) => {
@@ -1402,7 +1405,7 @@ async function runClaimedTeamDelivery({
     await adapter.prompt(
       session.real_session_id,
       session.cwd,
-      deliveryPrompt({ delivery, message, dependencies, runItems }),
+      deliveryPrompt({ delivery, message, member: activeMember, includeInitialization, dependencies, runItems }),
       handlers,
     );
 
@@ -1585,7 +1588,7 @@ function validateCreateTeam(
   return { value: { name: body.name.trim(), cwd: body.cwd.trim(), members } };
 }
 
-function memberInitializationPrompt(member: TeamMemberInput): string {
+function memberInitializationPrompt(member: Pick<TeamMemberInput, 'role' | 'responsibility_prompt'>): string {
   return [
     `You are ${member.role} in an agent team.`,
     '',
@@ -2066,11 +2069,15 @@ function assignmentContent(assignment: ValidatedPlanAssignment): string {
 function deliveryPrompt({
   delivery,
   message,
+  member,
+  includeInitialization,
   dependencies,
   runItems,
 }: {
   delivery: TeamMessageDeliveryRecord;
   message: TeamMessageRecord;
+  member: TeamMemberRecord;
+  includeInitialization: boolean;
   dependencies: Array<{ depends_on_delivery_id: string; dependency_type: TeamDeliveryDependencyType }>;
   runItems: TeamRunWithItems | undefined;
 }): string {
@@ -2089,6 +2096,9 @@ function deliveryPrompt({
   });
 
   return [
+    includeInitialization ? 'Member initialization (first delivery only):' : '',
+    includeInitialization ? memberInitializationPrompt(member) : '',
+    includeInitialization ? '' : '',
     `New delivery: ${delivery.delivery_id}`,
     `Run: ${delivery.run_id}`,
     '',
@@ -2109,18 +2119,4 @@ function compactForPrompt(value: string): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
   if (normalized.length <= 240) return normalized;
   return `${normalized.slice(0, 237)}...`;
-}
-
-function initializationHandlers(role: string): PromptHandlers {
-  return {
-    onTextDelta: () => {},
-    onToolCallStart: () => {},
-    onToolCallEnd: () => {},
-    onThinkingDelta: () => {},
-    onStatusNote: () => {},
-    onStatusChange: () => {},
-    onPermissionRequest: async (_request_id, tool_name) => {
-      throw new Error(`team member initialization for ${role} requested permission for ${tool_name}`);
-    },
-  };
 }

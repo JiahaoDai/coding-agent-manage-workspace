@@ -38,6 +38,7 @@ export interface TeamMemberRecord {
   responsibility_prompt: string;
   status: TeamMemberStatus;
   current_delivery_id: string | null;
+  initialized_at: number | null;
   session_missing?: boolean;
   create_time: number;
   modify_time: number;

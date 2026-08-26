@@ -62,6 +62,7 @@ export class SessionStore {
         responsibility_prompt TEXT NOT NULL,
         status                TEXT NOT NULL,
         current_delivery_id   TEXT,
+        initialized_at        INTEGER,
         create_time           INTEGER NOT NULL,
         modify_time           INTEGER NOT NULL,
         UNIQUE(team_id, role)
@@ -169,6 +170,10 @@ export class SessionStore {
     if (!attemptColumns.some((column) => column.name === 'output')) {
       db.exec(`ALTER TABLE team_delivery_attempt ADD COLUMN output TEXT`);
     }
+    const memberColumns = db.prepare(`PRAGMA table_info(team_member)`).all() as Array<{ name: string }>;
+    if (!memberColumns.some((column) => column.name === 'initialized_at')) {
+      db.exec(`ALTER TABLE team_member ADD COLUMN initialized_at INTEGER`);
+    }
   }
 
   insert(session: SessionRecord): void {
@@ -253,6 +258,17 @@ export class SessionStore {
       .run(status, current_delivery_id, Date.now(), member_id);
   }
 
+  markTeamMemberInitialized(member_id: string, now: number = Date.now()): TeamMemberRecord | undefined {
+    this.db
+      .prepare(
+        `UPDATE team_member
+         SET initialized_at = COALESCE(initialized_at, ?), modify_time = ?
+         WHERE member_id = ?`,
+      )
+      .run(now, now, member_id);
+    return this.getTeamMember(member_id);
+  }
+
   delete(session_id: string): void {
     this.db.prepare(`DELETE FROM session WHERE session_id = ?`).run(session_id);
   }
@@ -278,10 +294,10 @@ export class SessionStore {
       const insertMember = this.db.prepare(
         `INSERT INTO team_member
            (member_id, team_id, role, coding_agent, session_id, model, responsibility_prompt,
-            status, current_delivery_id, create_time, modify_time)
+            status, current_delivery_id, initialized_at, create_time, modify_time)
          VALUES
            (@member_id, @team_id, @role, @coding_agent, @session_id, @model, @responsibility_prompt,
-            @status, @current_delivery_id, @create_time, @modify_time)`,
+            @status, @current_delivery_id, @initialized_at, @create_time, @modify_time)`,
       );
       const insertQueue = this.db.prepare(`INSERT INTO team_member_queue (member_id, next_seq) VALUES (?, 1)`);
       for (const member of members) {
@@ -682,7 +698,7 @@ export class SessionStore {
     const row = this.db
       .prepare(
         `SELECT member_id, team_id, role, coding_agent, session_id, model, responsibility_prompt,
-                status, current_delivery_id, create_time, modify_time
+                status, current_delivery_id, initialized_at, create_time, modify_time
          FROM team_member WHERE member_id = ?`,
       )
       .get(member_id) as TeamMemberRow | undefined;
@@ -1057,6 +1073,7 @@ export class SessionStore {
       .prepare(
         `SELECT member.member_id, member.team_id, member.role, member.coding_agent, member.session_id,
                 member.model, member.responsibility_prompt, member.status, member.current_delivery_id,
+                member.initialized_at,
                 member.create_time, member.modify_time,
                 CASE WHEN session.session_id IS NULL THEN 1 ELSE 0 END AS session_missing
          FROM team_member member
@@ -1248,6 +1265,7 @@ interface TeamMemberRow {
   responsibility_prompt: string;
   status: TeamMemberRecord['status'];
   current_delivery_id: string | null;
+  initialized_at: number | null;
   session_missing?: 0 | 1;
   create_time: number;
   modify_time: number;

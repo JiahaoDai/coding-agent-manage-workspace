@@ -53,6 +53,7 @@ function member(overrides: Partial<TeamMemberRecord> = {}): TeamMemberRecord {
     responsibility_prompt: 'Lead the team.',
     status: 'idle',
     current_delivery_id: null,
+    initialized_at: null,
     create_time: 11,
     modify_time: 11,
     ...overrides,
