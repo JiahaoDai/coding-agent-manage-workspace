@@ -81,6 +81,15 @@ function deliveryActivityTime(delivery: TeamRunWithItems['deliveries'][number]):
   return delivery.created_at;
 }
 
+function attemptActivityTime(attempt: TeamRunWithItems['attempts'][number]): number {
+  if (attempt.status === 'running') return attempt.started_at;
+  return attempt.finished_at ?? attempt.started_at;
+}
+
+function deliveryStreamItemId(delivery_id: string, attempt_id?: string | null): string {
+  return attempt_id ? `delivery:${delivery_id}:attempt:${attempt_id}:stream` : `delivery:${delivery_id}:stream`;
+}
+
 function sourceDeliveryForMessage(
   message: TeamRunWithItems['messages'][number],
   deliveries: TeamRunWithItems['deliveries'],
@@ -114,6 +123,29 @@ function deliveryTranscriptText(
 
   if (parts.length > 0) return parts.join('\n\n');
   return delivery.status === 'done' ? 'Completed.' : '';
+}
+
+function deliveryAttemptTranscriptText(
+  run: TeamRunWithItems,
+  delivery: TeamRunWithItems['deliveries'][number],
+  attempt: TeamRunWithItems['attempts'][number],
+  attemptsForDelivery: TeamRunWithItems['attempts'],
+  sourceDeliveryByMessageId: Map<string, string>,
+): string {
+  const inputMessage = run.messages.find((message) => message.message_id === delivery.message_id);
+  const inputLabel = inputMessage ? teamMessageDisplayLabel(inputMessage.kind) : 'Delivery';
+  let text = inputMessage ? deliveryLiveInputText(inputLabel, inputMessage.content) : '';
+  if (attempt.output) text = appendRawTeamTextDelta(text, attempt.output);
+  if (attempt.error) text = appendDeliveryOutput(text, 'Error', attempt.error);
+
+  const latestAttempt = attemptsForDelivery[attemptsForDelivery.length - 1];
+  if (latestAttempt?.attempt_id === attempt.attempt_id) {
+    for (const message of run.messages.filter((message) => sourceDeliveryByMessageId.get(message.message_id) === delivery.delivery_id)) {
+      text = appendDeliveryOutput(text, teamMessageDisplayLabel(message.kind), message.content);
+    }
+  }
+
+  return text.trim() ? text : deliveryTranscriptText(run, delivery, sourceDeliveryByMessageId);
 }
 
 function appendDeliveryOutput(existingText: string, label: string, content: string): string {
@@ -278,17 +310,48 @@ function timelineFromRuns(runs: TeamRunWithItems[]): TeamTimelineItem[] {
     }
 
     for (const delivery of run.deliveries) {
-      items.push({
-        item_id: `delivery:${delivery.delivery_id}:stream`,
-        run_id: run.run.run_id,
-        kind: 'delivery_stream',
-        label: deliveryStreamLabel(delivery.message_id, run.run.root_user_message_id),
-        text: deliveryTranscriptText(run, delivery, sourceDeliveryByMessageId),
-        status: delivery.status,
-        member_id: delivery.to_member_id,
-        delivery_id: delivery.delivery_id,
-        create_time: delivery.started_at ?? delivery.created_at,
-      });
+      const attempts = (run.attempts ?? [])
+        .filter((attempt) => attempt.delivery_id === delivery.delivery_id)
+        .sort((a, b) => a.attempt_number - b.attempt_number);
+      if (attempts.length === 0) {
+        items.push({
+          item_id: deliveryStreamItemId(delivery.delivery_id),
+          run_id: run.run.run_id,
+          kind: 'delivery_stream',
+          label: deliveryStreamLabel(delivery.message_id, run.run.root_user_message_id),
+          text: deliveryTranscriptText(run, delivery, sourceDeliveryByMessageId),
+          status: delivery.status,
+          member_id: delivery.to_member_id,
+          delivery_id: delivery.delivery_id,
+          create_time: delivery.started_at ?? delivery.created_at,
+        });
+      }
+      for (const attempt of attempts) {
+        items.push({
+          item_id: deliveryStreamItemId(delivery.delivery_id, attempt.attempt_id),
+          run_id: run.run.run_id,
+          kind: 'delivery_stream',
+          label: `${deliveryStreamLabel(delivery.message_id, run.run.root_user_message_id)} attempt ${attempt.attempt_number}`,
+          text: deliveryAttemptTranscriptText(run, delivery, attempt, attempts, sourceDeliveryByMessageId),
+          status: attempt.status,
+          member_id: delivery.to_member_id,
+          delivery_id: delivery.delivery_id,
+          attempt_id: attempt.attempt_id,
+          create_time: attempt.started_at,
+        });
+        items.push({
+          item_id: `delivery:${delivery.delivery_id}:attempt:${attempt.attempt_id}:activity:${attempt.status}`,
+          run_id: run.run.run_id,
+          kind: 'delivery_activity',
+          label: 'Delivery attempt',
+          text: deliveryActivityText(attempt.status),
+          status: attempt.status,
+          member_id: delivery.to_member_id,
+          delivery_id: delivery.delivery_id,
+          attempt_id: attempt.attempt_id,
+          create_time: attemptActivityTime(attempt),
+        });
+      }
       items.push({
         item_id: `delivery:${delivery.delivery_id}:activity:${delivery.status}`,
         run_id: run.run.run_id,
@@ -532,7 +595,7 @@ export function App() {
               ...prev,
               [event.team_id]: putTimelineItem(
                 putTimelineItem(withUser, {
-                  item_id: `delivery:${event.delivery.delivery_id}:stream`,
+                  item_id: deliveryStreamItemId(event.delivery.delivery_id, event.attempt?.attempt_id),
                   run_id: event.run.run_id,
                   kind: 'delivery_stream',
                   label: 'Leader response',
@@ -540,6 +603,7 @@ export function App() {
                   status: event.delivery.status,
                   member_id: event.delivery.to_member_id,
                   delivery_id: event.delivery.delivery_id,
+                  attempt_id: event.attempt?.attempt_id,
                   create_time: event.delivery.created_at,
                 }),
                 {
@@ -562,23 +626,29 @@ export function App() {
           break;
         case 'team_delivery_status_change':
           setTeamTimeline((prev) => {
-            const itemId = `delivery:${event.delivery_id}:stream`;
+            const itemId = deliveryStreamItemId(event.delivery_id, event.attempt_id);
             const existing = prev[event.team_id]?.find((item) => item.item_id === itemId);
+            const fallback = event.attempt_id
+              ? prev[event.team_id]?.find((item) => item.item_id === deliveryStreamItemId(event.delivery_id))
+              : undefined;
             const items = putTimelineItem(prev[event.team_id] ?? [], {
               item_id: itemId,
               run_id: event.run_id,
               kind: 'delivery_stream',
-              label: existing?.label ?? 'Delivery',
-              text: existing?.text ?? '',
+              label: existing?.label ?? fallback?.label ?? 'Delivery',
+              text: existing?.text ?? fallback?.text ?? '',
               status: event.status,
               member_id: event.member_id,
               delivery_id: event.delivery_id,
+              attempt_id: event.attempt_id,
               create_time: existing?.create_time ?? Date.now(),
             });
             return {
               ...prev,
               [event.team_id]: putTimelineItem(items, {
-                item_id: `delivery:${event.delivery_id}:activity:${event.status}`,
+                item_id: event.attempt_id
+                  ? `delivery:${event.delivery_id}:attempt:${event.attempt_id}:activity:${event.status}`
+                  : `delivery:${event.delivery_id}:activity:${event.status}`,
                 run_id: event.run_id,
                 kind: 'delivery_activity',
                 label: 'Delivery status',
@@ -586,6 +656,7 @@ export function App() {
                 status: event.status,
                 member_id: event.member_id,
                 delivery_id: event.delivery_id,
+                attempt_id: event.attempt_id,
                 create_time: Date.now(),
               }),
             };
@@ -613,19 +684,23 @@ export function App() {
           break;
         case 'team_text_delta':
           setTeamTimeline((prev) => {
-            const itemId = `delivery:${event.delivery_id}:stream`;
+            const itemId = deliveryStreamItemId(event.delivery_id, event.attempt_id);
             const existing = prev[event.team_id]?.find((item) => item.item_id === itemId);
+            const fallback = event.attempt_id
+              ? prev[event.team_id]?.find((item) => item.item_id === deliveryStreamItemId(event.delivery_id))
+              : undefined;
             return {
               ...prev,
               [event.team_id]: putTimelineItem(prev[event.team_id] ?? [], {
                 item_id: itemId,
                 run_id: event.run_id,
                 kind: 'delivery_stream',
-                label: existing?.label ?? 'Leader response',
-                text: appendTeamStreamDelta(existing?.text ?? '', event),
+                label: existing?.label ?? fallback?.label ?? 'Leader response',
+                text: appendTeamStreamDelta(existing?.text ?? fallback?.text ?? '', event),
                 status: existing?.status ?? 'running',
                 member_id: event.member_id,
                 delivery_id: event.delivery_id,
+                attempt_id: event.attempt_id,
                 create_time: existing?.create_time ?? Date.now(),
               }),
             };
@@ -656,7 +731,7 @@ export function App() {
           break;
         case 'team_run_waiting_user':
           setTeamTimeline((prev) => {
-            const itemId = `delivery:${event.delivery.delivery_id}:stream`;
+            const itemId = deliveryStreamItemId(event.delivery.delivery_id, event.attempt?.attempt_id);
             const existing = prev[event.team_id]?.find((item) => item.item_id === itemId);
             let items = putTimelineItem(prev[event.team_id] ?? [], {
               item_id: itemId,
@@ -667,6 +742,7 @@ export function App() {
               status: event.delivery.status,
               member_id: event.delivery.to_member_id,
               delivery_id: event.delivery.delivery_id,
+              attempt_id: event.attempt?.attempt_id,
               create_time: existing?.create_time ?? event.delivery.created_at,
             });
             items = putTimelineItem(items, {
@@ -714,7 +790,7 @@ export function App() {
               create_time: event.user_message.create_time,
             });
             items = putTimelineItem(items, {
-              item_id: `delivery:${event.delivery.delivery_id}:stream`,
+              item_id: deliveryStreamItemId(event.delivery.delivery_id, event.attempt?.attempt_id),
               run_id: event.run.run_id,
               kind: 'delivery_stream',
               label: 'Leader follow-up',
@@ -722,6 +798,7 @@ export function App() {
               status: event.delivery.status,
               member_id: event.delivery.to_member_id,
               delivery_id: event.delivery.delivery_id,
+              attempt_id: event.attempt?.attempt_id,
               create_time: event.delivery.created_at,
             });
             items = putTimelineItem(items, {
@@ -767,7 +844,7 @@ export function App() {
             for (const delivery of event.deliveries) {
               const sourceMessage = event.assignment_messages.find((message) => message.message_id === delivery.message_id);
               items = putTimelineItem(items, {
-                item_id: `delivery:${delivery.delivery_id}:stream`,
+                item_id: deliveryStreamItemId(delivery.delivery_id),
                 run_id: event.run.run_id,
                 kind: 'delivery_stream',
                 label: 'Delivery',
@@ -809,6 +886,7 @@ export function App() {
                 status: event.delivery?.status,
                 member_id: event.message.from_member_id ?? event.delivery?.to_member_id,
                 delivery_id: sourceStream?.delivery_id ?? event.delivery?.delivery_id,
+                attempt_id: sourceStream?.attempt_id ?? event.attempt?.attempt_id,
                 create_time: event.message.create_time,
               });
               if (sourceStream) {
@@ -820,7 +898,7 @@ export function App() {
             }
             if (event.delivery) {
               items = putTimelineItem(items, {
-                item_id: `delivery:${event.delivery.delivery_id}:stream`,
+                item_id: deliveryStreamItemId(event.delivery.delivery_id, event.attempt?.attempt_id),
                 run_id: event.delivery.run_id,
                 kind: 'delivery_stream',
                 label: 'Leader follow-up',
@@ -828,6 +906,7 @@ export function App() {
                 status: event.delivery.status,
                 member_id: event.delivery.to_member_id,
                 delivery_id: event.delivery.delivery_id,
+                attempt_id: event.attempt?.attempt_id,
                 create_time: event.delivery.created_at,
               });
               items = putTimelineItem(items, {

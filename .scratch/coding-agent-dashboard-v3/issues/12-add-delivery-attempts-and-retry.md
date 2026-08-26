@@ -7,10 +7,10 @@
 **Status:** ready-for-agent
 
 - [ ] A failed delivery can be retried without overwriting the previous attempt's output.
-- [ ] Stream events are grouped by attempt as well as delivery.
+- [ ] Each attempt keeps its own compact output snapshot/error without overwriting previous attempts.
 - [ ] The UI shows failed and retried attempts distinctly.
 - [ ] Retrying respects global sequential scheduling and dependency rules.
-- [ ] Tests cover retry creation, attempt stream isolation, and retry success/failure states.
+- [ ] Tests cover retry creation, attempt output/error isolation, and retry success/failure states.
 
 ## Clarified retry semantics
 
@@ -38,6 +38,11 @@ Automatic retry must use delayed backoff instead of retrying immediately:
 - Attempt 3 fails: stop automatic retry and report the failed delivery to the
   leader.
 
+For automatic retryable failures, intermediate failed attempts only need to
+persist the retryable error reason, such as timeout or rate limit. They should
+not send a message to the leader while retry budget remains. The leader should
+only receive a failure message after retry attempts are exhausted.
+
 Non-retryable failures must not be automatically retried. Examples include:
 
 - Billing/quota exhausted or missing API key.
@@ -48,10 +53,11 @@ Non-retryable failures must not be automatically retried. Examples include:
 - Worker explicitly reports `FAILED: ...`.
 
 When a delivery exhausts retryable attempts, or fails with a non-retryable
-error, the orchestrator should preserve every attempt and send the failure
-context back to the leader. The leader then decides whether to re-plan, ask the
-user for input, switch members/tools, skip the failed task, or finish with an
-error.
+error, the orchestrator should preserve every attempt's status/error and, at
+most, a compact concatenated output snapshot from the failing attempt. It should
+then send the failure context back to the leader. The leader decides whether to
+re-plan, ask the user for input, switch members/tools, skip the failed task, or
+finish with an error.
 
 Retry scheduling must still obey the global sequential worker delivery rules and
 delivery dependency rules. A retry attempt should only become claimable once its

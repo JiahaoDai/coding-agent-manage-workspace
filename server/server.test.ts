@@ -105,14 +105,14 @@ class ScriptedAdapter extends BaseAdapter {
 
 }
 
-async function startServer(opts?: { dbPath?: string; fs?: FsTree }) {
+async function startServer(opts?: { dbPath?: string; fs?: FsTree; deliveryRetryBackoffMs?: number[] }) {
   const db = new Database(opts?.dbPath ?? ':memory:');
   const store = new SessionStore(db);
   const adapters = new AdapterRegistry();
   const fake = new ScriptedAdapter();
   adapters.register('fake', fake);
   const sse = new SseHub();
-  const app = createApp({ store, adapters, sse, fs: opts?.fs });
+  const app = createApp({ store, adapters, sse, fs: opts?.fs, deliveryRetryBackoffMs: opts?.deliveryRetryBackoffMs });
 
   let server!: ServerType;
   await new Promise<void>((resolve) => {
@@ -376,6 +376,7 @@ describe('walking skeleton', () => {
           run: { status: string };
           messages: Array<{ kind: string; content: string }>;
           deliveries: Array<{ status: string; to_member_id: string }>;
+          attempts: Array<{ attempt_id: string; delivery_id: string; status: string; output: string | null }>;
           dependencies: unknown[];
         }>;
         expect(runs).toHaveLength(1);
@@ -389,6 +390,7 @@ describe('walking skeleton', () => {
         ]);
         expect(runs[0].messages.at(-1)?.content).toBe('Team history now reloads from collaboration metadata.');
         expect(runs[0].deliveries.map((delivery) => delivery.status)).toEqual(['done', 'done', 'done']);
+        expect(runs[0].attempts).toHaveLength(3);
         expect(JSON.stringify(runs[0])).not.toContain('PRIVATE_NATIVE_THINKING_TRACE');
         expect(JSON.stringify(runs[0])).not.toContain('tool-private');
       } finally {
@@ -1689,6 +1691,116 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         content: 'team run exceeded max_rounds (8)',
       });
       expect(runs[0].deliveries.some((delivery) => delivery.status === 'failed')).toBe(true);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it.each([
+    {
+      name: 'transient worker failure retries into a separate successful attempt',
+      terminalFailures: 1,
+      expectCompleted: true,
+    },
+    {
+      name: 'transient worker failure exhaustion reports to leader',
+      terminalFailures: 3,
+      expectCompleted: false,
+    },
+  ])('$name', async ({ terminalFailures, expectCompleted }) => {
+    const { db, fake, server, baseUrl } = await startServer({ deliveryRetryBackoffMs: [0, 0] });
+    try {
+      let backendAttempts = 0;
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Try backend work with retryable failures.',
+            assignments: [
+              {
+                id: 'backend',
+                to: 'backend-coder',
+                task: 'Implement retryable backend work.',
+                context: 'Return a concise result.',
+                depends_on: [],
+              },
+            ],
+          }));
+          handlers.onStatusChange('completed');
+          return;
+        }
+
+        if (ctx.input.includes('New delivery:')) {
+          backendAttempts += 1;
+          handlers.onTextDelta(`partial attempt ${backendAttempts}`);
+          if (backendAttempts <= terminalFailures) throw new Error(`request timeout ${backendAttempts}`);
+          handlers.onTextDelta('RESULT: backend succeeded after retry.');
+          handlers.onStatusChange('completed');
+          return;
+        }
+
+        if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Leader handled retry outcome.',
+            result: 'Leader completed after reviewing worker outcome.',
+          }));
+          handlers.onStatusChange('completed');
+        }
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const backend = team.members.find((member) => member.role === 'backend-coder')!;
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Exercise delivery retry.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(reader, (evs) => evs.some((event) => event.type === 'team_run_completed'));
+      expect(events.filter((event) => event.type === 'team_delivery_status_change' && event.attempt_id)).not.toHaveLength(0);
+      expect(backendAttempts).toBe(expectCompleted ? 2 : 3);
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { status: string };
+        messages: Array<{ kind: string; content: string; from_member_id: string | null }>;
+        deliveries: Array<{ delivery_id: string; to_member_id: string; status: string; error: string | null }>;
+        attempts: Array<{
+          attempt_id: string;
+          delivery_id: string;
+          attempt_number: number;
+          status: string;
+          output: string | null;
+          error: string | null;
+        }>;
+      }>;
+      const backendDelivery = runs[0].deliveries.find((delivery) => delivery.to_member_id === backend.member_id)!;
+      const attempts = runs[0].attempts.filter((attempt) => attempt.delivery_id === backendDelivery.delivery_id);
+      expect(attempts.map((attempt) => attempt.attempt_number)).toEqual(
+        expectCompleted ? [1, 2] : [1, 2, 3],
+      );
+      expect(attempts.at(0)).toMatchObject({ status: 'failed', error: 'request timeout 1' });
+
+      expect(attempts[0].output).toBeNull();
+      expect(runs[0].messages.filter((message) => message.kind === 'error')).toHaveLength(expectCompleted ? 0 : 1);
+
+      if (expectCompleted) {
+        expect(backendDelivery).toMatchObject({ status: 'done', error: null });
+        expect(attempts[1]).toMatchObject({ status: 'done', error: null });
+        expect(attempts[1].output).toContain('partial attempt 2');
+        expect(attempts[1].output).toContain('RESULT: backend succeeded after retry.');
+      } else {
+        expect(backendDelivery).toMatchObject({ status: 'failed', error: 'request timeout 3' });
+        expect(attempts[2]).toMatchObject({ status: 'failed', error: 'request timeout 3' });
+        expect(attempts[2].output).toContain('partial attempt 3');
+        expect(runs[0].messages.some((message) => message.kind === 'error' && message.content === 'request timeout 3')).toBe(true);
+      }
 
       await reader.cancel();
     } finally {
