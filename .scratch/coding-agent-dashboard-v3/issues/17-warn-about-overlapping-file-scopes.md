@@ -1,8 +1,8 @@
-# 14: Warn about overlapping file scopes
+# 17: Warn about overlapping file scopes
 
 **What to build:** When parallel execution is enabled, show risk warnings for deliveries that declare or infer overlapping file scopes, so the user can understand potential conflict before multiple members modify the same project directory.
 
-**Blocked by:** 13: Enable configurable cross-member parallelism.
+**Blocked by:** 16: Enable configurable cross-member parallelism.
 
 **Status:** ready-for-agent
 

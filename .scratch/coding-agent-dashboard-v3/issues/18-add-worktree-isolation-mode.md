@@ -1,8 +1,8 @@
-# 15: Add worktree isolation mode
+# 18: Add worktree isolation mode
 
 **What to build:** Let advanced users create a team where members work in isolated git worktrees, so parallel coding work can happen on separate branches and be merged with explicit user visibility.
 
-**Blocked by:** 13: Enable configurable cross-member parallelism.
+**Blocked by:** 16: Enable configurable cross-member parallelism.
 
 **Status:** ready-for-agent
 
