@@ -9,3 +9,4 @@ test/
 skills-lock.json
 AGENTS.md
 .bug/
+.vscode/
