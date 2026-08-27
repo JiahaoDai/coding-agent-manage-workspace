@@ -4,10 +4,10 @@
 
 **Blocked by:** 14: Wait for worker wave before leader follow-up.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A leader follow-up prompt can include multiple pending inbound result, review, error, or proposal deliveries in one batch.
-- [ ] Current batch content is packed with a clear token budget policy: full content when it fits, explicit orchestrator excerpts when it does not.
-- [ ] Consumed leader inbox deliveries are marked as processed together, and remaining cancellation semantics do not hide already-produced results as accidental leftovers.
-- [ ] The team run history or activity view makes it understandable that the leader processed multiple inbound deliveries together.
-- [ ] Tests cover the TikTok/Xiaohongshu shape: two worker results reach the leader, the leader final uses both, and no complete pending worker result is misread as truncated or cancelled as stale.
+- [x] A leader follow-up prompt can include multiple pending inbound result, review, error, or proposal deliveries in one batch.
+- [x] Current batch content is packed with a clear token budget policy: full content when it fits, explicit orchestrator excerpts when it does not.
+- [x] Consumed leader inbox deliveries are marked as processed together, and remaining cancellation semantics do not hide already-produced results as accidental leftovers.
+- [x] The team run history or activity view makes it understandable that the leader processed multiple inbound deliveries together.
+- [x] Tests cover the TikTok/Xiaohongshu shape: two worker results reach the leader, the leader final uses both, and no complete pending worker result is misread as truncated or cancelled as stale.

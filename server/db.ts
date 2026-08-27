@@ -709,6 +709,82 @@ export class SessionStore {
     return Boolean(row);
   }
 
+  listLeaderInboxBatch(input: {
+    run_id: string;
+    leader_member_id: string;
+    primary_delivery_id: string;
+  }): Array<{ delivery: TeamMessageDeliveryRecord; message: TeamMessageRecord }> {
+    const rows = this.db
+      .prepare(
+        `SELECT delivery.delivery_id, delivery.message_id, delivery.team_id, delivery.run_id,
+                delivery.to_member_id, delivery.status, delivery.enqueue_seq, delivery.created_at,
+                delivery.started_at, delivery.finished_at, delivery.error, delivery.max_attempts, delivery.retry_after,
+                message.message_id AS msg_message_id, message.team_id AS msg_team_id,
+                message.run_id AS msg_run_id, message.from_member_id AS msg_from_member_id,
+                message.from_kind AS msg_from_kind, message.kind AS msg_kind,
+                message.content AS msg_content, message.create_time AS msg_create_time
+         FROM team_message_delivery delivery
+         JOIN team_message message ON message.message_id = delivery.message_id
+         WHERE delivery.run_id = ?
+           AND delivery.to_member_id = ?
+           AND (
+             delivery.delivery_id = ?
+             OR (
+               delivery.status = 'pending'
+               AND message.kind IN ('result', 'review', 'error', 'proposal')
+             )
+           )
+         ORDER BY delivery.created_at ASC, delivery.enqueue_seq ASC, delivery.delivery_id ASC`,
+      )
+      .all(input.run_id, input.leader_member_id, input.primary_delivery_id) as Array<
+      TeamDeliveryRow & {
+        msg_message_id: string;
+        msg_team_id: string;
+        msg_run_id: string;
+        msg_from_member_id: string | null;
+        msg_from_kind: TeamMessageRecord['from_kind'];
+        msg_kind: TeamMessageRecord['kind'];
+        msg_content: string;
+        msg_create_time: number;
+      }
+    >;
+
+    return rows.map((row) => ({
+      delivery: toTeamDelivery(row),
+      message: toTeamMessage({
+        message_id: row.msg_message_id,
+        team_id: row.msg_team_id,
+        run_id: row.msg_run_id,
+        from_member_id: row.msg_from_member_id,
+        from_kind: row.msg_from_kind,
+        kind: row.msg_kind,
+        content: row.msg_content,
+        create_time: row.msg_create_time,
+      }),
+    }));
+  }
+
+  markPendingTeamDeliveriesDone(delivery_ids: string[]): TeamMessageDeliveryRecord[] {
+    if (delivery_ids.length === 0) return [];
+    const finish = this.db.transaction(() => {
+      const now = Date.now();
+      const update = this.db.prepare(
+        `UPDATE team_message_delivery
+         SET status = 'done', finished_at = ?, retry_after = NULL, error = NULL
+         WHERE delivery_id = ? AND status = 'pending'`,
+      );
+      const rows: TeamMessageDeliveryRecord[] = [];
+      for (const delivery_id of delivery_ids) {
+        update.run(now, delivery_id);
+        const row = this.getTeamDeliveryRow(delivery_id);
+        if (row) rows.push(toTeamDelivery(row));
+      }
+      return rows;
+    });
+
+    return finish();
+  }
+
   getTeamMember(member_id: string): TeamMemberRecord | undefined {
     const row = this.db
       .prepare(

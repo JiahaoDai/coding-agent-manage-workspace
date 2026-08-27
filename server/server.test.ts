@@ -1259,8 +1259,8 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         'done',
         'done',
         'done',
-        'cancelled',
-        'cancelled',
+        'done',
+        'done',
       ]);
 
       const backend = team.members.find((member) => member.role === 'backend-coder')!;
@@ -1273,7 +1273,7 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
     }
   });
 
-  it('marks long message bus excerpts so leader does not request resend for complete worker output', async () => {
+  it('processes complete worker results as one leader inbox batch without stale cancellation', async () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {
       const backendResult = `RESULT: Backend result is complete. ${'backend detail '.repeat(80)}BACKEND_COMPLETE_END`;
@@ -1307,8 +1307,8 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         } else if (ctx.input.includes('New inbound team message:')) {
           leaderFollowUpPrompts.push(ctx.input);
           const guardedExcerpt =
+            ctx.input.includes('Current leader inbox batch:') &&
             ctx.input.includes('Run message bus summary (orchestrator-generated excerpts; not full message bodies):') &&
-            ctx.input.includes('[orchestrator excerpt shortened for prompt budget; original message may be complete]') &&
             ctx.input.includes('do not treat that marker as evidence that the original worker output was truncated or incomplete');
           if (!guardedExcerpt && ctx.input.includes('...')) {
             handlers.onTextDelta(JSON.stringify({
@@ -1351,16 +1351,27 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
       );
 
       expect(leaderFollowUpPrompts).not.toHaveLength(0);
-      expect(leaderFollowUpPrompts[0]).toContain('New inbound team message: full content for this delivery');
+      expect(leaderFollowUpPrompts[0]).toContain('New inbound team message: current leader inbox batch follows');
+      expect(leaderFollowUpPrompts[0]).toContain('Current leader inbox batch:');
       expect(leaderFollowUpPrompts[0]).toContain('BACKEND_COMPLETE_END');
-      expect(leaderFollowUpPrompts[0]).toContain('[orchestrator excerpt shortened for prompt budget; original message may be complete]');
-      expect(leaderFollowUpPrompts[0]).not.toContain('REVIEWER_COMPLETE_END');
+      expect(leaderFollowUpPrompts[0]).toContain('REVIEWER_COMPLETE_END');
+      expect(leaderFollowUpPrompts).toHaveLength(1);
 
       const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
-        messages: Array<{ kind: string; content: string }>;
+        messages: Array<{ message_id: string; kind: string; content: string }>;
+        deliveries: Array<{ message_id: string; status: string; to_member_id: string }>;
       }>;
       expect(runs[0].messages.some((message) => message.kind === 'assignment' && message.content.includes('Resend your complete output'))).toBe(false);
       expect(runs[0].messages.some((message) => message.kind === 'result' && message.content.includes('REVIEWER_COMPLETE_END'))).toBe(true);
+      expect(runs[0].messages.some((message) => message.kind === 'status' && message.content.includes('Leader processed inbox batch:'))).toBe(true);
+
+      const messageById = new Map(runs[0].messages.map((message) => [message.message_id, message]));
+      const leader = team.members.find((member) => member.role === 'leader')!;
+      const leaderResultDeliveries = runs[0].deliveries.filter((delivery) => {
+        const message = messageById.get(delivery.message_id);
+        return delivery.to_member_id === leader.member_id && message?.kind === 'result';
+      });
+      expect(leaderResultDeliveries.map((delivery) => delivery.status)).toEqual(['done', 'done']);
 
       await reader.cancel();
     } finally {
