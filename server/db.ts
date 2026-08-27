@@ -694,6 +694,21 @@ export class SessionStore {
     return claim();
   }
 
+  hasActiveNonLeaderTeamDeliveries(run_id: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1
+         FROM team_message_delivery delivery
+         JOIN team_member member ON member.member_id = delivery.to_member_id
+         WHERE delivery.run_id = ?
+           AND member.role != 'leader'
+           AND delivery.status IN ('pending', 'running')
+         LIMIT 1`,
+      )
+      .get(run_id);
+    return Boolean(row);
+  }
+
   getTeamMember(member_id: string): TeamMemberRecord | undefined {
     const row = this.db
       .prepare(

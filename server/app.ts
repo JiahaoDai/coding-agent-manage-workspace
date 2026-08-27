@@ -850,8 +850,7 @@ async function runTeamOrchestrator({
       });
     }
 
-    let claimed = deps.store.claimNextRunnableTeamDelivery(run_id, { includeLeader: false });
-    if (!claimed) claimed = deps.store.claimNextRunnableTeamDelivery(run_id);
+    const claimed = claimNextDeliveryForCurrentWave(deps, run_id);
     if (!claimed) break;
 
     deps.sse.broadcast({
@@ -886,6 +885,18 @@ async function runTeamOrchestrator({
   }
 
   deps.store.completeRunIfNoOpenDeliveries(run_id);
+}
+
+function claimNextDeliveryForCurrentWave(deps: AppDeps, run_id: string) {
+  const nonLeader = deps.store.claimNextRunnableTeamDelivery(run_id, { includeLeader: false });
+  if (nonLeader) return nonLeader;
+
+  // Keep leader follow-up behind the current worker/reviewer wave. Pending
+  // retry-delayed deliveries can still produce output, so let their scheduled
+  // orchestrator wake-up run before the leader consumes the inbox.
+  if (deps.store.hasActiveNonLeaderTeamDeliveries(run_id)) return undefined;
+
+  return deps.store.claimNextRunnableTeamDelivery(run_id);
 }
 
 function markLeaderWaitingForUser({

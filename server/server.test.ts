@@ -1369,6 +1369,181 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
     }
   });
 
+  it('waits for runnable non-leader deliveries before leader follow-up', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const leaderFollowUpPrompts: string[] = [];
+
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Collect backend and reviewer wave results.',
+            assignments: [
+              {
+                id: 'backend-wave',
+                to: 'backend-coder',
+                task: 'Produce backend wave result.',
+                context: 'Return a concise backend result.',
+                depends_on: [],
+              },
+              {
+                id: 'reviewer-wave',
+                to: 'reviewer',
+                task: 'Produce reviewer wave result.',
+                context: 'Return a concise reviewer result.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          handlers.onTextDelta(
+            ctx.input.includes('backend wave result')
+              ? 'RESULT: Backend wave complete.'
+              : 'RESULT: Reviewer wave complete.',
+          );
+        } else if (ctx.input.includes('New inbound team message:')) {
+          leaderFollowUpPrompts.push(ctx.input);
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Leader saw the completed wave.',
+            result: 'Leader followed up after both non-leader deliveries finished.',
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Collect a two-worker wave.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+
+      const promptKinds = fake.promptCalls.map((call) => {
+        if (call.input.includes('User request:')) return 'leader-plan';
+        if (call.input.includes('New inbound team message:')) return 'leader-follow-up';
+        if (call.input.includes('Produce backend wave result.')) return 'backend-worker';
+        if (call.input.includes('Produce reviewer wave result.')) return 'reviewer-worker';
+        return 'unknown';
+      });
+      expect(promptKinds.slice(0, 4)).toEqual(['leader-plan', 'backend-worker', 'reviewer-worker', 'leader-follow-up']);
+      expect(leaderFollowUpPrompts).toHaveLength(1);
+      expect(leaderFollowUpPrompts[0]).toContain('Backend wave complete.');
+      expect(leaderFollowUpPrompts[0]).toContain('Reviewer wave complete.');
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('does not deadlock leader follow-up when non-leader work is retry-delayed or dependency-blocked', async () => {
+    const { db, fake, server, baseUrl } = await startServer({ deliveryRetryBackoffMs: [30] });
+    try {
+      let flakyAttempts = 0;
+      const leaderFollowUpPrompts: string[] = [];
+
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Exercise retry delay and dependency blocking.',
+            assignments: [
+              {
+                id: 'flaky-backend',
+                to: 'backend-coder',
+                task: 'Run flaky backend wave task.',
+                context: 'This may hit a transient network timeout.',
+                depends_on: [],
+              },
+              {
+                id: 'blocked-review',
+                to: 'reviewer',
+                task: 'Review backend only after success.',
+                context: 'This should stay blocked while backend is retry-delayed.',
+                depends_on: ['flaky-backend'],
+                dependency_type: 'success',
+              },
+              {
+                id: 'independent-review',
+                to: 'reviewer',
+                task: 'Produce independent reviewer wave result.',
+                context: 'This can run without the backend result.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New inbound team message:')) {
+          leaderFollowUpPrompts.push(ctx.input);
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Leader handled the completed worker wave.',
+            result: 'Leader completed after retry-delayed and dependency-blocked work finished.',
+          }));
+        } else if (ctx.input.includes('Review backend only after success.')) {
+          handlers.onTextDelta('REVIEW: Blocked review ran after backend retry success.');
+        } else if (ctx.input.includes('Run flaky backend wave task.')) {
+          flakyAttempts += 1;
+          if (flakyAttempts === 1) throw new Error('network timeout while running backend worker');
+          handlers.onTextDelta('RESULT: Flaky backend succeeded after retry.');
+        } else if (ctx.input.includes('Produce independent reviewer wave result.')) {
+          handlers.onTextDelta('RESULT: Independent reviewer complete.');
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Exercise delayed and blocked worker wave.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { status: string };
+        messages: Array<{ message_id: string; kind: string; content: string }>;
+        deliveries: Array<{ message_id: string; status: string }>;
+      }>;
+      expect(runs[0].run.status).toBe('completed');
+
+      const messageById = new Map(runs[0].messages.map((message) => [message.message_id, message]));
+      const deliveryForAssignment = (assignmentId: string) =>
+        runs[0].deliveries.find((delivery) => messageById.get(delivery.message_id)?.content.includes(`Assignment ${assignmentId}`));
+
+      expect(flakyAttempts).toBe(2);
+      expect(deliveryForAssignment('flaky-backend')?.status).toBe('done');
+      expect(deliveryForAssignment('blocked-review')?.status).toBe('done');
+      expect(deliveryForAssignment('independent-review')?.status).toBe('done');
+      expect(leaderFollowUpPrompts).toHaveLength(1);
+      expect(leaderFollowUpPrompts[0]).toContain('Flaky backend succeeded after retry.');
+      expect(leaderFollowUpPrompts[0]).toContain('Blocked review ran after backend retry success.');
+      expect(runs[0].messages.some((message) => message.kind === 'result' && message.content.includes('Independent reviewer complete.'))).toBe(true);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
   it('repairs a leader final JSON object with prose, unescaped quotes, and literal newlines', async () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {

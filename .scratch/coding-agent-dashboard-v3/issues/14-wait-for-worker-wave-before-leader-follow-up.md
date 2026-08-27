@@ -4,11 +4,10 @@
 
 **Blocked by:** 13: Mark orchestrator excerpts as summaries.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] After a leader plan creates multiple worker or reviewer deliveries, the orchestrator prefers runnable non-leader deliveries before leader follow-up deliveries.
-- [ ] The leader is awakened when the current wave has no runnable non-leader delivery left, while still respecting blocked dependencies, retries, waiting-user state, and run failure rules.
-- [ ] A worker result that arrives while another worker delivery is still runnable remains pending in the leader inbox instead of being processed immediately.
-- [ ] Tests cover a two-worker run where both results are available before the leader follow-up prompt is sent.
-- [ ] Tests cover that the run does not deadlock when a non-leader delivery is blocked, retry-delayed, failed, or waiting on dependencies.
-
+- [x] After a leader plan creates multiple worker or reviewer deliveries, the orchestrator prefers runnable non-leader deliveries before leader follow-up deliveries.
+- [x] The leader is awakened when the current wave has no runnable non-leader delivery left, while still respecting blocked dependencies, retries, waiting-user state, and run failure rules.
+- [x] A worker result that arrives while another worker delivery is still runnable remains pending in the leader inbox instead of being processed immediately.
+- [x] Tests cover a two-worker run where both results are available before the leader follow-up prompt is sent.
+- [x] Tests cover that the run does not deadlock when a non-leader delivery is blocked, retry-delayed, failed, or waiting on dependencies.
