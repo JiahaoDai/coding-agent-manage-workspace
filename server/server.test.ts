@@ -1273,6 +1273,102 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
     }
   });
 
+  it('marks long message bus excerpts so leader does not request resend for complete worker output', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const backendResult = `RESULT: Backend result is complete. ${'backend detail '.repeat(80)}BACKEND_COMPLETE_END`;
+      const reviewerResult = `RESULT: Reviewer result is complete. ${'reviewer detail '.repeat(80)}REVIEWER_COMPLETE_END`;
+      const leaderFollowUpPrompts: string[] = [];
+
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Collect two complete worker results.',
+            assignments: [
+              {
+                id: 'backend-result',
+                to: 'backend-coder',
+                task: 'Produce a long complete backend result.',
+                context: 'Return a complete result.',
+                depends_on: [],
+              },
+              {
+                id: 'reviewer-result',
+                to: 'reviewer',
+                task: 'Produce a long complete reviewer result.',
+                context: 'Return a complete result.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          handlers.onTextDelta(ctx.input.includes('backend result') ? backendResult : reviewerResult);
+        } else if (ctx.input.includes('New inbound team message:')) {
+          leaderFollowUpPrompts.push(ctx.input);
+          const guardedExcerpt =
+            ctx.input.includes('Run message bus summary (orchestrator-generated excerpts; not full message bodies):') &&
+            ctx.input.includes('[orchestrator excerpt shortened for prompt budget; original message may be complete]') &&
+            ctx.input.includes('do not treat that marker as evidence that the original worker output was truncated or incomplete');
+          if (!guardedExcerpt && ctx.input.includes('...')) {
+            handlers.onTextDelta(JSON.stringify({
+              type: 'plan',
+              summary: 'Request resend because the message bus looked truncated.',
+              assignments: [
+                {
+                  id: 'resend',
+                  to: 'reviewer',
+                  task: 'Resend your complete output.',
+                  context: 'The leader thought the prior message ended mid-stream.',
+                  depends_on: [],
+                },
+              ],
+            }));
+          } else {
+            handlers.onTextDelta(JSON.stringify({
+              type: 'final',
+              summary: 'Complete worker outputs were not mistaken for truncation.',
+              result: 'Leader handled the available complete worker output without requesting a resend.',
+            }));
+          }
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Collect both worker results.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+
+      expect(leaderFollowUpPrompts).not.toHaveLength(0);
+      expect(leaderFollowUpPrompts[0]).toContain('New inbound team message: full content for this delivery');
+      expect(leaderFollowUpPrompts[0]).toContain('BACKEND_COMPLETE_END');
+      expect(leaderFollowUpPrompts[0]).toContain('[orchestrator excerpt shortened for prompt budget; original message may be complete]');
+      expect(leaderFollowUpPrompts[0]).not.toContain('REVIEWER_COMPLETE_END');
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        messages: Array<{ kind: string; content: string }>;
+      }>;
+      expect(runs[0].messages.some((message) => message.kind === 'assignment' && message.content.includes('Resend your complete output'))).toBe(false);
+      expect(runs[0].messages.some((message) => message.kind === 'result' && message.content.includes('REVIEWER_COMPLETE_END'))).toBe(true);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
   it('repairs a leader final JSON object with prose, unescaped quotes, and literal newlines', async () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {

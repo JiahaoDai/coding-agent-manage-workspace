@@ -1744,12 +1744,13 @@ function leaderFollowUpPrompt({
     'Leader responsibility:',
     leader.responsibility_prompt,
     '',
-    'New inbound team message:',
+    'New inbound team message: full content for this delivery',
     `Kind: ${message.kind}`,
     `From: ${sender}`,
     message.content,
     '',
-    'Run message bus summary:',
+    'Run message bus summary (orchestrator-generated excerpts; not full message bodies):',
+    'If an item is marked as an orchestrator excerpt, do not treat that marker as evidence that the original worker output was truncated or incomplete.',
     busLines.length > 0 ? busLines.join('\n') : '- none',
     '',
     'Decide whether to finish now, ask the user for clarification, or create another plan for existing team members.',
@@ -2131,5 +2132,5 @@ function deliveryPrompt({
 function compactForPrompt(value: string): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
   if (normalized.length <= 240) return normalized;
-  return `${normalized.slice(0, 237)}...`;
+  return `[orchestrator excerpt shortened for prompt budget; original message may be complete] ${normalized.slice(0, 237)}`;
 }
