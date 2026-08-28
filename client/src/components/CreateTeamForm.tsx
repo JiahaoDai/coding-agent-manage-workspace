@@ -37,6 +37,7 @@ export function CreateTeamForm({
 }) {
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState('');
+  const [worktreeIsolation, setWorktreeIsolation] = useState(false);
   const [members, setMembers] = useState<TeamMemberInput[]>([defaultMember('leader')]);
   const [fsRoot, setFsRoot] = useState<{ root: string; name: string } | null>(null);
   const [fsError, setFsError] = useState<string | null>(null);
@@ -110,6 +111,7 @@ export function CreateTeamForm({
       const team = await createTeam({
         name: name.trim(),
         cwd: cwd.trim(),
+        worktree_isolation: worktreeIsolation,
         members: members.map((member) => ({
           ...member,
           role: member.role.trim(),
@@ -163,6 +165,15 @@ export function CreateTeamForm({
           <p className="file-node-loading">Loading…</p>
         )}
       </div>
+
+      <label className="field checkbox-field">
+        <input
+          type="checkbox"
+          checked={worktreeIsolation}
+          onChange={(event) => setWorktreeIsolation(event.target.checked)}
+        />
+        <span>Use git worktree isolation for read/write members</span>
+      </label>
 
       <fieldset className="team-members-field">
         <legend className="field-label">Members</legend>

@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { execFile } from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { AdapterRegistry } from './adapters/registry';
@@ -36,6 +39,7 @@ export interface AppDeps {
 }
 
 const DEFAULT_DELIVERY_RETRY_BACKOFF_MS = [30_000, 60_000];
+const execFileAsync = promisify(execFile);
 
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
@@ -174,7 +178,7 @@ export function createApp(deps: AppDeps): Hono {
     const validation = validateCreateTeam(body);
     if ('error' in validation) return c.json({ error: validation.error }, 400);
 
-    const { name, cwd, members } = validation.value;
+    const { name, cwd, members, worktree_isolation } = validation.value;
     const now = Date.now();
     const team: TeamRecord = {
       team_id: randomUUID(),
@@ -189,6 +193,7 @@ export function createApp(deps: AppDeps): Hono {
     const teamMembers: TeamMemberRecord[] = [];
 
     try {
+      const gitRepository = worktree_isolation ? await resolveEligibleGitRepository(cwd) : null;
       for (const member of members) {
         const adapter = deps.adapters.get(member.agent);
         if (!adapter) return c.json({ error: `unknown agent for member ${member.role}: ${member.agent}` }, 400);
@@ -209,11 +214,18 @@ export function createApp(deps: AppDeps): Hono {
 
       for (const member of members) {
         const adapter = deps.adapters.get(member.agent)!;
+        const memberWorkspace = gitRepository && member.file_access === 'read_write'
+          ? await createMemberWorktree(gitRepository, team.team_id, member.role, teamMembers.length)
+          : {
+              execution_cwd: cwd,
+              worktree_path: null,
+              worktree_branch: null,
+            };
 
         const session_id = randomUUID();
-        const { real_session_id } = await adapter.createSession(cwd, { name: `${name} / ${member.role}` });
+        const { real_session_id } = await adapter.createSession(memberWorkspace.execution_cwd, { name: `${name} / ${member.role}` });
         if (member.model !== null) {
-          const selected = await adapter.setModel(real_session_id, cwd, member.model);
+          const selected = await adapter.setModel(real_session_id, memberWorkspace.execution_cwd, member.model);
           if (!selected.supported) return c.json({ error: `model selection failed for member ${member.role}: ${selected.reason}` }, 409);
         }
 
@@ -222,7 +234,7 @@ export function createApp(deps: AppDeps): Hono {
           coding_agent: member.agent,
           real_session_id,
           name: `${name} / ${member.role}`,
-          cwd,
+          cwd: memberWorkspace.execution_cwd,
           status: 'completed',
           model: member.model,
           last_error: null,
@@ -238,9 +250,9 @@ export function createApp(deps: AppDeps): Hono {
           model: member.model,
           responsibility_prompt: member.responsibility_prompt,
           file_access: member.file_access,
-          execution_cwd: cwd,
-          worktree_path: null,
-          worktree_branch: null,
+          execution_cwd: memberWorkspace.execution_cwd,
+          worktree_path: memberWorkspace.worktree_path,
+          worktree_branch: memberWorkspace.worktree_branch,
           status: 'idle',
           current_delivery_id: null,
           initialized_at: null,
@@ -1673,6 +1685,9 @@ function validateCreateTeam(
 ): { value: CreateTeamInput } | { error: string } {
   if (!body || typeof body.name !== 'string' || body.name.trim() === '') return { error: 'name is required' };
   if (typeof body.cwd !== 'string' || body.cwd.trim() === '') return { error: 'cwd is required' };
+  if (body.worktree_isolation !== undefined && typeof body.worktree_isolation !== 'boolean') {
+    return { error: 'worktree_isolation must be a boolean' };
+  }
   if (!Array.isArray(body.members) || body.members.length === 0) return { error: 'members are required' };
 
   const roles = new Set<string>();
@@ -1703,7 +1718,77 @@ function validateCreateTeam(
   }
   if (!roles.has('leader')) return { error: 'team requires a leader member' };
 
-  return { value: { name: body.name.trim(), cwd: body.cwd.trim(), members } };
+  return { value: { name: body.name.trim(), cwd: body.cwd.trim(), worktree_isolation: body.worktree_isolation === true, members } };
+}
+
+interface EligibleGitRepository {
+  root: string;
+  parent: string;
+}
+
+interface MemberWorkspace {
+  execution_cwd: string;
+  worktree_path: string | null;
+  worktree_branch: string | null;
+}
+
+async function resolveEligibleGitRepository(cwd: string): Promise<EligibleGitRepository> {
+  const inside = await runGit(cwd, ['rev-parse', '--is-inside-work-tree']).catch((err) => {
+    throw new Error(`worktree isolation requires cwd to be inside a git repository: ${errorMessage(err)}`);
+  });
+  if (inside.stdout.trim() !== 'true') {
+    throw new Error('worktree isolation requires cwd to be inside a git work tree');
+  }
+
+  const topLevel = await runGit(cwd, ['rev-parse', '--show-toplevel']).catch((err) => {
+    throw new Error(`worktree isolation could not find the git repository root: ${errorMessage(err)}`);
+  });
+  const root = resolve(topLevel.stdout.trim());
+  await runGit(root, ['rev-parse', '--verify', 'HEAD']).catch((err) => {
+    throw new Error(`worktree isolation requires a git repository with an initial commit: ${errorMessage(err)}`);
+  });
+
+  return { root, parent: dirname(root) };
+}
+
+async function createMemberWorktree(
+  repository: EligibleGitRepository,
+  team_id: string,
+  role: string,
+  index: number,
+): Promise<MemberWorkspace> {
+  const roleSlug = slugForWorktree(role) || `member-${index + 1}`;
+  const branch = `agent-team/${team_id}/${roleSlug}`;
+  const worktreePath = resolve(repository.parent, '.agent-team-worktrees', team_id, roleSlug);
+  try {
+    await mkdir(dirname(worktreePath), { recursive: true });
+    await runGit(repository.root, ['worktree', 'add', '-b', branch, worktreePath, 'HEAD']);
+  } catch (err) {
+    throw new Error(`failed to create worktree for member ${role}: ${errorMessage(err)}`);
+  }
+  return {
+    execution_cwd: worktreePath,
+    worktree_path: worktreePath,
+    worktree_branch: branch,
+  };
+}
+
+async function runGit(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+}
+
+function slugForWorktree(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
 }
 
 function normalizeTeamMemberFileAccess(value: unknown): TeamMemberInput['file_access'] | null {

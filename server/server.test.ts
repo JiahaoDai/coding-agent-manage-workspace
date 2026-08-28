@@ -1,7 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { serve, type ServerType } from '@hono/node-server';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
@@ -138,6 +139,18 @@ async function createSession(baseUrl: string, name: string): Promise<SessionReco
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function createCommittedGitRepo(parent: string): string {
+  const repo = join(parent, 'project');
+  mkdirSync(repo, { recursive: true });
+  execFileSync('git', ['init'], { cwd: repo, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repo, stdio: 'ignore' });
+  writeFileSync(join(repo, 'README.md'), 'initial\n');
+  execFileSync('git', ['add', 'README.md'], { cwd: repo, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'initial'], { cwd: repo, stdio: 'ignore' });
+  return execFileSync('git', ['-C', repo, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+}
 
 function readWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -504,6 +517,171 @@ describe('agent teams (v3 ticket #1)', () => {
     } finally {
       server.close();
       db.close();
+    }
+  });
+
+  it('creates isolated worktrees for read-write members before their sessions when enabled', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-team-worktree-'));
+    const repo = createCommittedGitRepo(dir);
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'Isolated Team',
+        cwd: repo,
+        worktree_isolation: true,
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Plan and summarize work.',
+            file_access: 'read_only',
+          },
+          {
+            role: 'backend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Implement backend changes.',
+            file_access: 'read_write',
+          },
+        ],
+      });
+
+      expect(res.status).toBe(201);
+      const created = await res.json() as {
+        team_id: string;
+        cwd: string;
+        members: Array<{
+          role: string;
+          session_id: string;
+          file_access: string;
+          execution_cwd: string;
+          worktree_path: string | null;
+          worktree_branch: string | null;
+        }>;
+      };
+      const leader = created.members.find((member) => member.role === 'leader')!;
+      const backend = created.members.find((member) => member.role === 'backend-coder')!;
+      const expectedBackendBranch = `agent-team/${created.team_id}/backend-coder`;
+      const expectedBackendPath = join(dirname(repo), '.agent-team-worktrees', created.team_id, 'backend-coder');
+
+      expect(created.cwd).toBe(repo);
+      expect(leader).toMatchObject({
+        file_access: 'read_only',
+        execution_cwd: repo,
+        worktree_path: null,
+        worktree_branch: null,
+      });
+      expect(backend).toMatchObject({
+        file_access: 'read_write',
+        execution_cwd: expectedBackendPath,
+        worktree_path: expectedBackendPath,
+        worktree_branch: expectedBackendBranch,
+      });
+      expect(fake.created).toEqual([repo, expectedBackendPath]);
+
+      const sessions = await (await fetch(`${baseUrl}/api/sessions`)).json() as SessionRecord[];
+      expect(sessions).toHaveLength(0);
+      const branch = execFileSync('git', ['-C', expectedBackendPath, 'branch', '--show-current'], { encoding: 'utf8' }).trim();
+      expect(branch).toBe(expectedBackendBranch);
+    } finally {
+      server.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects worktree isolation when cwd is not inside a git repository', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-team-no-git-'));
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'No Git Team',
+        cwd: dir,
+        worktree_isolation: true,
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Lead work.',
+            file_access: 'read_write',
+          },
+        ],
+      });
+
+      expect(res.status).toBe(422);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain('worktree isolation requires cwd to be inside a git repository');
+    } finally {
+      server.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects worktree isolation when the git repository has no initial commit', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-team-empty-git-'));
+    const repo = join(dir, 'project');
+    mkdirSync(repo, { recursive: true });
+    execFileSync('git', ['init'], { cwd: repo, stdio: 'ignore' });
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'Empty Git Team',
+        cwd: repo,
+        worktree_isolation: true,
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Lead work.',
+            file_access: 'read_write',
+          },
+        ],
+      });
+
+      expect(res.status).toBe(422);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain('worktree isolation requires a git repository with an initial commit');
+    } finally {
+      server.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects team creation when member worktree preparation fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-team-worktree-failure-'));
+    const repo = createCommittedGitRepo(dir);
+    writeFileSync(join(dirname(repo), '.agent-team-worktrees'), 'not a directory\n');
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'Blocked Worktree Team',
+        cwd: repo,
+        worktree_isolation: true,
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Lead work.',
+            file_access: 'read_write',
+          },
+        ],
+      });
+
+      expect(res.status).toBe(422);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain('failed to create worktree for member leader');
+      expect(fake.created).toEqual([]);
+      expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toEqual([]);
+    } finally {
+      server.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

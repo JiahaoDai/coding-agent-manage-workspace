@@ -40,6 +40,11 @@ export function TeamOverview({
             <p className="team-member-meta">
               {member.file_access === 'read_only' ? 'read only' : 'read/write'} · {member.execution_cwd}
             </p>
+            {member.worktree_branch && member.worktree_path && (
+              <p className="team-member-meta" title={member.worktree_path}>
+                {member.worktree_branch} · {member.worktree_path}
+              </p>
+            )}
             <p className="team-member-session" title={member.session_id}>
               {member.session_id}
             </p>

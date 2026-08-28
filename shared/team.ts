@@ -127,5 +127,6 @@ export interface TeamMemberInput {
 export interface CreateTeamInput {
   name: string;
   cwd: string;
+  worktree_isolation?: boolean;
   members: TeamMemberInput[];
 }

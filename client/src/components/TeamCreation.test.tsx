@@ -35,6 +35,19 @@ const team: TeamWithMembers = {
   ],
 };
 
+const isolatedTeam: TeamWithMembers = {
+  ...team,
+  members: [
+    {
+      ...team.members[0],
+      file_access: 'read_write',
+      execution_cwd: '/workspace/.agent-team-worktrees/team-1/backend-coder',
+      worktree_path: '/workspace/.agent-team-worktrees/team-1/backend-coder',
+      worktree_branch: 'agent-team/team-1/backend-coder',
+    },
+  ],
+};
+
 describe('team creation UI', () => {
   it('renders role templates and member fields for a new team', () => {
     const markup = renderToStaticMarkup(
@@ -47,6 +60,8 @@ describe('team creation UI', () => {
     expect(markup).toContain('backend-coder');
     expect(markup).toContain('Select an agent');
     expect(markup).toContain('Select a directory first');
+    expect(markup).toContain('Use git worktree isolation for read/write members');
+    expect(markup).toContain('File access');
     expect(markup).toContain('Role prompt');
   });
 
@@ -59,6 +74,14 @@ describe('team creation UI', () => {
     expect(markup).toContain('fake · default model');
     expect(markup).toContain('session-1');
     expect(markup).not.toContain('Delete team');
+  });
+
+  it('shows worktree metadata for isolated members', () => {
+    const markup = renderToStaticMarkup(<TeamOverview team={isolatedTeam} />);
+
+    expect(markup).toContain('read/write');
+    expect(markup).toContain('/workspace/.agent-team-worktrees/team-1/backend-coder');
+    expect(markup).toContain('agent-team/team-1/backend-coder');
   });
 
   it('renders the team delete action in the sidebar list', () => {
