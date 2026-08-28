@@ -63,6 +63,10 @@ export class SessionStore {
         status                TEXT NOT NULL,
         current_delivery_id   TEXT,
         initialized_at        INTEGER,
+        file_access           TEXT NOT NULL DEFAULT 'read_write',
+        execution_cwd         TEXT NOT NULL DEFAULT '',
+        worktree_path         TEXT,
+        worktree_branch       TEXT,
         create_time           INTEGER NOT NULL,
         modify_time           INTEGER NOT NULL,
         UNIQUE(team_id, role)
@@ -174,6 +178,28 @@ export class SessionStore {
     if (!memberColumns.some((column) => column.name === 'initialized_at')) {
       db.exec(`ALTER TABLE team_member ADD COLUMN initialized_at INTEGER`);
     }
+    if (!memberColumns.some((column) => column.name === 'file_access')) {
+      db.exec(`ALTER TABLE team_member ADD COLUMN file_access TEXT NOT NULL DEFAULT 'read_write'`);
+    }
+    if (!memberColumns.some((column) => column.name === 'execution_cwd')) {
+      db.exec(`ALTER TABLE team_member ADD COLUMN execution_cwd TEXT NOT NULL DEFAULT ''`);
+    }
+    if (!memberColumns.some((column) => column.name === 'worktree_path')) {
+      db.exec(`ALTER TABLE team_member ADD COLUMN worktree_path TEXT`);
+    }
+    if (!memberColumns.some((column) => column.name === 'worktree_branch')) {
+      db.exec(`ALTER TABLE team_member ADD COLUMN worktree_branch TEXT`);
+    }
+    db.exec(`
+      UPDATE team_member
+      SET execution_cwd = COALESCE(
+        NULLIF(execution_cwd, ''),
+        (SELECT cwd FROM session WHERE session.session_id = team_member.session_id),
+        (SELECT cwd FROM team WHERE team.team_id = team_member.team_id),
+        ''
+      )
+      WHERE execution_cwd = ''
+    `);
   }
 
   insert(session: SessionRecord): void {
@@ -294,10 +320,12 @@ export class SessionStore {
       const insertMember = this.db.prepare(
         `INSERT INTO team_member
            (member_id, team_id, role, coding_agent, session_id, model, responsibility_prompt,
-            status, current_delivery_id, initialized_at, create_time, modify_time)
+            status, current_delivery_id, initialized_at, file_access, execution_cwd, worktree_path,
+            worktree_branch, create_time, modify_time)
          VALUES
            (@member_id, @team_id, @role, @coding_agent, @session_id, @model, @responsibility_prompt,
-            @status, @current_delivery_id, @initialized_at, @create_time, @modify_time)`,
+            @status, @current_delivery_id, @initialized_at, @file_access, @execution_cwd, @worktree_path,
+            @worktree_branch, @create_time, @modify_time)`,
       );
       const insertQueue = this.db.prepare(`INSERT INTO team_member_queue (member_id, next_seq) VALUES (?, 1)`);
       for (const member of members) {
@@ -789,7 +817,8 @@ export class SessionStore {
     const row = this.db
       .prepare(
         `SELECT member_id, team_id, role, coding_agent, session_id, model, responsibility_prompt,
-                status, current_delivery_id, initialized_at, create_time, modify_time
+                status, current_delivery_id, initialized_at, file_access, execution_cwd,
+                worktree_path, worktree_branch, create_time, modify_time
          FROM team_member WHERE member_id = ?`,
       )
       .get(member_id) as TeamMemberRow | undefined;
@@ -1164,7 +1193,8 @@ export class SessionStore {
       .prepare(
         `SELECT member.member_id, member.team_id, member.role, member.coding_agent, member.session_id,
                 member.model, member.responsibility_prompt, member.status, member.current_delivery_id,
-                member.initialized_at,
+                member.initialized_at, member.file_access, member.execution_cwd,
+                member.worktree_path, member.worktree_branch,
                 member.create_time, member.modify_time,
                 CASE WHEN session.session_id IS NULL THEN 1 ELSE 0 END AS session_missing
          FROM team_member member
@@ -1358,6 +1388,10 @@ interface TeamMemberRow {
   current_delivery_id: string | null;
   initialized_at: number | null;
   session_missing?: 0 | 1;
+  file_access: TeamMemberRecord['file_access'];
+  execution_cwd: string;
+  worktree_path: string | null;
+  worktree_branch: string | null;
   create_time: number;
   modify_time: number;
 }

@@ -452,12 +452,14 @@ describe('agent teams (v3 ticket #1)', () => {
             agent: 'fake',
             model: null,
             responsibility_prompt: 'Lead the team and produce final answers.',
+            file_access: 'read_only',
           },
           {
             role: 'docs-writer',
             agent: 'fake',
             model: 'fake/fast',
             responsibility_prompt: 'Write user-facing docs for completed team work.',
+            file_access: 'read_write',
           },
         ],
       });
@@ -467,10 +469,23 @@ describe('agent teams (v3 ticket #1)', () => {
         team_id: string;
         name: string;
         cwd: string;
-        members: Array<{ role: string; session_id: string; coding_agent: string; model: string | null }>;
+        members: Array<{
+          role: string;
+          session_id: string;
+          coding_agent: string;
+          model: string | null;
+          file_access: string;
+          execution_cwd: string;
+          worktree_path: string | null;
+          worktree_branch: string | null;
+        }>;
       };
       expect(created).toMatchObject({ name: 'Product Builder', cwd: '/tmp/team-project' });
       expect(created.members.map((member) => member.role)).toEqual(['leader', 'docs-writer']);
+      expect(created.members.map((member) => member.file_access)).toEqual(['read_only', 'read_write']);
+      expect(created.members.map((member) => member.execution_cwd)).toEqual(['/tmp/team-project', '/tmp/team-project']);
+      expect(created.members.map((member) => member.worktree_path)).toEqual([null, null]);
+      expect(created.members.map((member) => member.worktree_branch)).toEqual([null, null]);
       expect(new Set(created.members.map((member) => member.session_id)).size).toBe(2);
 
       const sessions = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
@@ -730,11 +745,11 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
           return;
         }
         if (ctx.input.includes('New delivery:')) {
-          const decision = await handlers.onPermissionRequest('team-perm-1', 'Bash', { command: 'ls' });
+          const decision = await handlers.onPermissionRequest('team-perm-1', 'Bash', { command: 'npm test' });
           fake.permissionDecisions.push({
             request_id: 'team-perm-1',
             tool_name: 'Bash',
-            input: { command: 'ls' },
+            input: { command: 'npm test' },
             decision,
           });
           handlers.onTextDelta(`RESULT: permission was ${decision}`);
@@ -797,15 +812,17 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
         session_id: backend.session_id,
         request_id: 'team-perm-1',
         tool_name: 'Bash',
-        input: { command: 'ls' },
+        input: { command: 'npm test' },
         team_context: {
           team_id: team.team_id,
           team_name: 'Permission Team',
           member_id: backend.member_id,
           member_role: 'backend-coder',
           member_agent: 'fake',
+          member_file_access: 'read_write',
           session_id: backend.session_id,
           cwd: '/tmp/team-project',
+          execution_cwd: '/tmp/team-project',
         },
       });
       expect(request.team_context!.run_id).toMatch(/[0-9a-f-]{36}/);
@@ -846,7 +863,7 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
       });
 
       expect(fake.permissionDecisions).toEqual([
-        { request_id: 'team-perm-1', tool_name: 'Bash', input: { command: 'ls' }, decision: 'allow' },
+        { request_id: 'team-perm-1', tool_name: 'Bash', input: { command: 'npm test' }, decision: 'allow' },
       ]);
 
       const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
@@ -999,18 +1016,21 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
           agent: 'fake',
           model: null,
           responsibility_prompt: 'Plan work for the team.',
+          file_access: 'read_write',
         },
         {
           role: 'backend-coder',
           agent: 'fake',
           model: null,
           responsibility_prompt: 'Implement backend tasks.',
+          file_access: 'read_write',
         },
         {
           role: 'reviewer',
           agent: 'fake',
           model: null,
           responsibility_prompt: 'Review completed work.',
+          file_access: 'read_only',
         },
       ],
     });
@@ -1092,6 +1112,10 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
       expect(leaderPrompt).toContain('- leader: agent=fake');
       expect(leaderPrompt).toContain('- backend-coder: agent=fake');
       expect(leaderPrompt).toContain('- reviewer: agent=fake');
+      expect(leaderPrompt).toContain('Workspace policy:');
+      expect(leaderPrompt).toContain('- File access: read_write');
+      expect(leaderPrompt).toContain('- Team root cwd: /tmp/team-project');
+      expect(leaderPrompt).toContain('- Your execution cwd: /tmp/team-project');
       expect(leaderPrompt).toContain('each assignments[].to MUST be exactly one of: leader, backend-coder, reviewer');
 
       const planEvent = events.find(
@@ -1239,11 +1263,16 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
       expect(workerPrompts[0]).toContain('Member initialization (first delivery only):');
       expect(workerPrompts[0]).toContain('You are backend-coder in an agent team.');
       expect(workerPrompts[0]).toContain('Implement backend tasks.');
+      expect(workerPrompts[0]).toContain('Workspace policy:');
+      expect(workerPrompts[0]).toContain('- File access: read_write');
+      expect(workerPrompts[0]).toContain('- Your execution cwd: /tmp/team-project');
       expect(workerPrompts[1]).not.toContain('Member initialization (first delivery only):');
       expect(workerPrompts[1]).not.toContain('You are backend-coder in an agent team.');
       expect(workerPrompts[2]).toContain('Member initialization (first delivery only):');
       expect(workerPrompts[2]).toContain('You are reviewer in an agent team.');
       expect(workerPrompts[2]).toContain('Review completed work.');
+      expect(workerPrompts[2]).toContain('- File access: read_only');
+      expect(workerPrompts[2]).toContain('- You are read-only for this team.');
       for (const prompt of workerPrompts) {
         expect(prompt).not.toContain('Leader responsibility:');
       }
@@ -1265,6 +1294,227 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
 
       const backend = team.members.find((member) => member.role === 'backend-coder')!;
       expect(runs[0].deliveries.filter((delivery) => delivery.to_member_id === backend.member_id).map((delivery) => delivery.enqueue_seq)).toEqual([1, 2]);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('fails planning when a write-required assignment targets a read-only member', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Mistakenly ask reviewer to edit.',
+            assignments: [
+              {
+                id: 'reviewer-fix',
+                to: 'reviewer',
+                task_type: 'fix',
+                requires_file_write: true,
+                task: 'Patch the failing route test.',
+                context: 'This should require file writes.',
+                depends_on: [],
+              },
+            ],
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Ask reviewer to fix code.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_failed'),
+      );
+      const failed = events.find(
+        (event): event is Extract<ServerEvent, { type: 'team_run_failed' }> =>
+          event.type === 'team_run_failed',
+      )!;
+      expect(failed.error_message.content).toBe(
+        'assignment reviewer-fix requires file write access but target member reviewer is read_only',
+      );
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { status: string };
+        messages: Array<{ kind: string; content: string }>;
+        deliveries: Array<{ status: string }>;
+      }>;
+      expect(runs[0].run.status).toBe('failed');
+      expect(runs[0].messages.map((message) => message.kind)).toEqual(['user_request', 'error']);
+      expect(runs[0].deliveries).toHaveLength(1);
+      expect(runs[0].deliveries[0].status).toBe('failed');
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('auto-denies structured write tools for read-only members before user confirmation', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = async (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Ask reviewer to inspect docs.',
+            assignments: [
+              {
+                id: 'review-docs',
+                to: 'reviewer',
+                task_type: 'review',
+                requires_file_write: false,
+                task: 'Review the docs.',
+                context: 'Do not edit files.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          const decision = await handlers.onPermissionRequest('readonly-edit', 'Edit', {
+            file_path: '/tmp/team-project/README.md',
+          });
+          fake.permissionDecisions.push({
+            request_id: 'readonly-edit',
+            tool_name: 'Edit',
+            input: { file_path: '/tmp/team-project/README.md' },
+            decision,
+          });
+          handlers.onTextDelta(`REVIEW: readonly write request was ${decision}.`);
+        } else if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Policy denial handled.',
+            result: 'Readonly policy denied the attempted edit.',
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Review docs.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+      expect(events.filter((event) => event.type === 'permission_request')).toHaveLength(0);
+      expect(events.some(
+        (event) =>
+          event.type === 'team_text_delta' &&
+          event.stream_kind === 'status' &&
+          event.stream_label === 'policy' &&
+          event.text.includes('read_only'),
+      )).toBe(true);
+      expect(fake.permissionDecisions).toEqual([
+        {
+          request_id: 'readonly-edit',
+          tool_name: 'Edit',
+          input: { file_path: '/tmp/team-project/README.md' },
+          decision: 'deny',
+        },
+      ]);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('auto-denies read-write structured write paths outside execution cwd', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = async (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Ask backend to edit.',
+            assignments: [
+              {
+                id: 'backend-edit',
+                to: 'backend-coder',
+                task_type: 'implementation',
+                requires_file_write: true,
+                task: 'Edit the backend.',
+                context: 'Stay inside the execution cwd.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          const decision = await handlers.onPermissionRequest('outside-edit', 'Edit', {
+            file_path: '/tmp/other-project/server.ts',
+          });
+          fake.permissionDecisions.push({
+            request_id: 'outside-edit',
+            tool_name: 'Edit',
+            input: { file_path: '/tmp/other-project/server.ts' },
+            decision,
+          });
+          handlers.onTextDelta(`RESULT: outside write request was ${decision}.`);
+        } else if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Path boundary handled.',
+            result: 'Read-write member could not write outside execution cwd.',
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Edit backend outside cwd.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+      expect(events.filter((event) => event.type === 'permission_request')).toHaveLength(0);
+      expect(events.some(
+        (event) =>
+          event.type === 'team_text_delta' &&
+          event.stream_kind === 'status' &&
+          event.stream_label === 'policy' &&
+          event.text.includes('outside execution_cwd'),
+      )).toBe(true);
+      expect(fake.permissionDecisions).toEqual([
+        {
+          request_id: 'outside-edit',
+          tool_name: 'Edit',
+          input: { file_path: '/tmp/other-project/server.ts' },
+          decision: 'deny',
+        },
+      ]);
 
       await reader.cancel();
     } finally {

@@ -25,6 +25,10 @@ const team: TeamWithMembers = {
       status: 'idle',
       current_delivery_id: null,
       initialized_at: null,
+      file_access: 'read_only',
+      execution_cwd: '/project',
+      worktree_path: null,
+      worktree_branch: null,
       create_time: 1,
       modify_time: 1,
     },
@@ -39,6 +43,10 @@ const team: TeamWithMembers = {
       status: 'running',
       current_delivery_id: 'delivery-review',
       initialized_at: null,
+      file_access: 'read_only',
+      execution_cwd: '/project',
+      worktree_path: null,
+      worktree_branch: null,
       create_time: 2,
       modify_time: 2,
     },
@@ -101,9 +109,11 @@ describe('TeamChatView', () => {
           member_id: 'member-2',
           member_role: 'reviewer',
           member_agent: 'fake',
+          member_file_access: 'read_only',
           delivery_id: 'delivery-review',
           session_id: 'session-2',
           cwd: '/project',
+          execution_cwd: '/project',
         }}
         items={[
           {
@@ -349,9 +359,11 @@ describe('PermissionModal', () => {
             member_id: 'member-2',
             member_role: 'reviewer',
             member_agent: 'fake',
+            member_file_access: 'read_only',
             delivery_id: 'delivery-review',
             session_id: 'session-2',
             cwd: '/project',
+            execution_cwd: '/project',
           },
         }}
         sessionLabel="reviewer session · fake"
@@ -363,10 +375,12 @@ describe('PermissionModal', () => {
     expect(markup).toContain('Product Builder');
     expect(markup).toContain('run-1');
     expect(markup).toContain('reviewer');
+    expect(markup).toContain('read_only');
     expect(markup).toContain('fake');
     expect(markup).toContain('reviewer session · fake · session-2');
     expect(markup).toContain('delivery-review');
     expect(markup).toContain('/project');
+    expect(markup).toContain('Execution CWD');
     expect(markup).toContain('Bash');
     expect(markup).toContain('&quot;command&quot;: &quot;npm test&quot;');
   });

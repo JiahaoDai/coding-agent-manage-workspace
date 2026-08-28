@@ -54,6 +54,10 @@ function member(overrides: Partial<TeamMemberRecord> = {}): TeamMemberRecord {
     status: 'idle',
     current_delivery_id: null,
     initialized_at: null,
+    file_access: 'read_write',
+    execution_cwd: '/project',
+    worktree_path: null,
+    worktree_branch: null,
     create_time: 11,
     modify_time: 11,
     ...overrides,
@@ -114,6 +118,50 @@ describe('SessionStore latest-error persistence', () => {
 });
 
 describe('SessionStore agent team persistence', () => {
+  it('migrates legacy team members with read-write compatibility defaults and execution cwd', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-team-db-migration-'));
+    temporaryDirs.push(dir);
+    const path = join(dir, 'sessions.db');
+    const legacy = new Database(path);
+    legacy.exec(`
+      CREATE TABLE session (
+        session_id TEXT PRIMARY KEY, coding_agent TEXT NOT NULL, real_session_id TEXT NOT NULL,
+        name TEXT NOT NULL, cwd TEXT NOT NULL, status TEXT NOT NULL, model TEXT, last_error TEXT,
+        create_time INTEGER NOT NULL, modify_time INTEGER NOT NULL
+      );
+      CREATE TABLE team (
+        team_id TEXT PRIMARY KEY, name TEXT NOT NULL, cwd TEXT NOT NULL, status TEXT NOT NULL,
+        max_parallel_members INTEGER NOT NULL, create_time INTEGER NOT NULL, modify_time INTEGER NOT NULL
+      );
+      CREATE TABLE team_member (
+        member_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, role TEXT NOT NULL,
+        coding_agent TEXT NOT NULL, session_id TEXT NOT NULL UNIQUE, model TEXT,
+        responsibility_prompt TEXT NOT NULL, status TEXT NOT NULL, current_delivery_id TEXT,
+        initialized_at INTEGER, create_time INTEGER NOT NULL, modify_time INTEGER NOT NULL,
+        UNIQUE(team_id, role)
+      );
+
+      INSERT INTO session VALUES ('dashboard-session-1', 'fake', 'native-session-1', 'Legacy member', '/legacy-project', 'completed', NULL, NULL, 1, 2);
+      INSERT INTO team VALUES ('team-1', 'Legacy Team', '/legacy-project', 'idle', 1, 10, 20);
+      INSERT INTO team_member VALUES ('member-1', 'team-1', 'leader', 'fake', 'dashboard-session-1', NULL, 'Lead legacy work.', 'idle', NULL, NULL, 11, 21);
+    `);
+    legacy.close();
+
+    const db = new Database(path);
+    try {
+      const store = new SessionStore(db);
+      expect(store.getTeam('team-1')?.members[0]).toMatchObject({
+        member_id: 'member-1',
+        file_access: 'read_write',
+        execution_cwd: '/legacy-project',
+        worktree_path: null,
+        worktree_branch: null,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('persists teams with members and enforces one team member per session', () => {
     const db = new Database(':memory:');
     try {

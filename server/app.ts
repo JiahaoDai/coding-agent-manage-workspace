@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { AdapterRegistry } from './adapters/registry';
@@ -236,6 +237,10 @@ export function createApp(deps: AppDeps): Hono {
           session_id,
           model: member.model,
           responsibility_prompt: member.responsibility_prompt,
+          file_access: member.file_access,
+          execution_cwd: cwd,
+          worktree_path: null,
+          worktree_branch: null,
           status: 'idle',
           current_delivery_id: null,
           initialized_at: null,
@@ -633,19 +638,23 @@ async function runLeaderOnlyDelivery({
       deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status });
     },
     onPermissionRequest: async (request_id, tool_name, input) => {
-      deps.store.updateTeamMemberStatus(leader.member_id, 'waiting_permission', delivery_id);
-      const team_context = teamPermissionContext({
+      return handleTeamPermissionRequest({
+        deps,
+        permissions,
         team_name,
         team_id,
         run_id: run.run_id,
         member: leader,
         session,
         delivery_id,
+        request_id,
+        tool_name,
+        input,
+        onPolicyNote: (note) => {
+          output.push(note);
+          broadcastLeaderText(note, 'status', 'policy');
+        },
       });
-      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input, team_context });
-      const decision = await permissions.request(session.session_id, request_id, team_context);
-      deps.store.updateTeamMemberStatus(leader.member_id, 'running', delivery_id);
-      return decision;
     },
   };
 
@@ -655,7 +664,7 @@ async function runLeaderOnlyDelivery({
     await adapter.prompt(
       session.real_session_id,
       cwd,
-      leaderOnlyPrompt({ team_name, leader: activeLeader, includeInitialization, text, members: team_members }),
+      leaderOnlyPrompt({ team_name, leader: activeLeader, includeInitialization, text, members: team_members, team_cwd: cwd }),
       handlers,
     );
 
@@ -1133,19 +1142,23 @@ async function runClaimedLeaderFollowUpDelivery({
       deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status });
     },
     onPermissionRequest: async (request_id, tool_name, input) => {
-      deps.store.updateTeamMemberStatus(leader.member_id, 'waiting_permission', delivery.delivery_id);
-      const team_context = teamPermissionContext({
+      return handleTeamPermissionRequest({
+        deps,
+        permissions,
         team_name: team?.name ?? delivery.team_id,
         team_id: delivery.team_id,
         run_id: delivery.run_id,
         member: leader,
         session,
         delivery_id: delivery.delivery_id,
+        request_id,
+        tool_name,
+        input,
+        onPolicyNote: (note) => {
+          output.push(note);
+          broadcastLeaderText(note, 'status', 'policy');
+        },
       });
-      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input, team_context });
-      const decision = await permissions.request(session.session_id, request_id, team_context);
-      deps.store.updateTeamMemberStatus(leader.member_id, 'running', delivery.delivery_id);
-      return decision;
     },
   };
 
@@ -1166,6 +1179,7 @@ async function runClaimedLeaderFollowUpDelivery({
         inboxBatch: leaderBatch,
         members: team?.members ?? [leader],
         runItems,
+        team_cwd: team?.cwd ?? leader.execution_cwd,
       }),
       handlers,
     );
@@ -1462,19 +1476,33 @@ async function runClaimedTeamDelivery({
       deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status });
     },
     onPermissionRequest: async (request_id, tool_name, input) => {
-      deps.store.updateTeamMemberStatus(member.member_id, 'waiting_permission', delivery.delivery_id);
-      const team_context = teamPermissionContext({
+      return handleTeamPermissionRequest({
+        deps,
+        permissions,
         team_name: team?.name ?? delivery.team_id,
         team_id: delivery.team_id,
         run_id: delivery.run_id,
         member,
         session,
         delivery_id: delivery.delivery_id,
+        request_id,
+        tool_name,
+        input,
+        onPolicyNote: (note) => {
+          output.push(note);
+          broadcastTeamTextDelta({
+            deps,
+            team_id: delivery.team_id,
+            run_id: delivery.run_id,
+            delivery_id: delivery.delivery_id,
+            attempt_id: attempt.attempt_id,
+            member_id: member.member_id,
+            text: note,
+            stream_kind: 'status',
+            stream_label: 'policy',
+          });
+        },
       });
-      deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input, team_context });
-      const decision = await permissions.request(session.session_id, request_id, team_context);
-      deps.store.updateTeamMemberStatus(member.member_id, 'running', delivery.delivery_id);
-      return decision;
     },
   };
 
@@ -1484,7 +1512,15 @@ async function runClaimedTeamDelivery({
     await adapter.prompt(
       session.real_session_id,
       session.cwd,
-      deliveryPrompt({ delivery, message, member: activeMember, includeInitialization, dependencies, runItems }),
+      deliveryPrompt({
+        delivery,
+        message,
+        member: activeMember,
+        includeInitialization,
+        dependencies,
+        runItems,
+        team_cwd: team?.cwd ?? session.cwd,
+      }),
       handlers,
     );
 
@@ -1653,6 +1689,8 @@ function validateCreateTeam(
       return { error: 'member responsibility_prompt is required' };
     }
     const role = member.role.trim();
+    const file_access = normalizeTeamMemberFileAccess(member.file_access);
+    if (!file_access) return { error: 'member file_access must be read_only or read_write' };
     if (roles.has(role)) return { error: `duplicate member role: ${role}` };
     roles.add(role);
     members.push({
@@ -1660,6 +1698,7 @@ function validateCreateTeam(
       agent: member.agent.trim(),
       model: member.model ?? null,
       responsibility_prompt: member.responsibility_prompt.trim(),
+      file_access,
     });
   }
   if (!roles.has('leader')) return { error: 'team requires a leader member' };
@@ -1667,7 +1706,20 @@ function validateCreateTeam(
   return { value: { name: body.name.trim(), cwd: body.cwd.trim(), members } };
 }
 
-function memberInitializationPrompt(member: Pick<TeamMemberInput, 'role' | 'responsibility_prompt'>): string {
+function normalizeTeamMemberFileAccess(value: unknown): TeamMemberInput['file_access'] | null {
+  if (value === undefined || value === null) return defaultTeamMemberFileAccess();
+  if (value === 'read_only' || value === 'read_write') return value;
+  return null;
+}
+
+function defaultTeamMemberFileAccess(): TeamMemberInput['file_access'] {
+  return 'read_write';
+}
+
+function memberInitializationPrompt(
+  member: Pick<TeamMemberRecord, 'role' | 'responsibility_prompt' | 'file_access' | 'execution_cwd' | 'worktree_path'>,
+  team_cwd: string,
+): string {
   return [
     `You are ${member.role} in an agent team.`,
     '',
@@ -1679,6 +1731,27 @@ function memberInitializationPrompt(member: Pick<TeamMemberInput, 'role' | 'resp
     '- Treat each incoming delivery as the next task in this same team session.',
     '- Do not assume a previous task should be repeated unless the new delivery says so.',
     '- Report results concisely for the leader.',
+    '',
+    'Workspace policy:',
+    `- File access: ${member.file_access}`,
+    `- Team root cwd: ${team_cwd}`,
+    `- Your execution cwd: ${member.execution_cwd}`,
+    member.worktree_path ? `- Worktree path: ${member.worktree_path}` : '- Worktree path: none',
+    '- Do not operate on files outside your execution cwd.',
+    ...(member.file_access === 'read_only'
+      ? [
+          '- You are read-only for this team.',
+          '- You may inspect files and report findings.',
+          '- Do not edit, create, delete, rename, format, install dependencies, commit, merge, or run commands that modify files.',
+          '- If the delivery requires file changes, respond with NEED_INFO or PROPOSAL instead of attempting edits.',
+        ]
+      : [
+          '- You may edit files for this team.',
+          '- Only edit files inside your execution cwd.',
+          '- When worktree path is present, your execution cwd is your isolated worktree.',
+          '- Do not modify the original team root cwd from this session.',
+          '- Report touched files and test results in RESULT.',
+        ]),
     '',
     'Output format:',
     '- RESULT: ...',
@@ -1719,10 +1792,149 @@ function teamPermissionContext({
     member_id: member.member_id,
     member_role: member.role,
     member_agent: member.coding_agent,
+    member_file_access: member.file_access,
     delivery_id,
     session_id: session.session_id,
     cwd: session.cwd,
+    execution_cwd: member.execution_cwd,
   };
+}
+
+async function handleTeamPermissionRequest({
+  deps,
+  permissions,
+  team_name,
+  team_id,
+  run_id,
+  member,
+  session,
+  delivery_id,
+  request_id,
+  tool_name,
+  input,
+  onPolicyNote,
+}: {
+  deps: AppDeps;
+  permissions: PermissionBroker;
+  team_name: string;
+  team_id: string;
+  run_id: string;
+  member: TeamMemberRecord;
+  session: SessionRecord;
+  delivery_id: string;
+  request_id: string;
+  tool_name: string;
+  input: unknown;
+  onPolicyNote: (note: string) => void;
+}): Promise<'allow' | 'deny'> {
+  const policy = evaluateTeamToolPolicy(member, tool_name, input);
+  if (policy.decision === 'deny') {
+    onPolicyNote(`Denied by team policy: ${policy.reason}`);
+    return 'deny';
+  }
+
+  const team_context = teamPermissionContext({
+    team_name,
+    team_id,
+    run_id,
+    member,
+    session,
+    delivery_id,
+  });
+  deps.store.updateTeamMemberStatus(member.member_id, 'waiting_permission', delivery_id);
+  deps.sse.broadcast({ type: 'permission_request', session_id: session.session_id, request_id, tool_name, input, team_context });
+  const decision = await permissions.request(session.session_id, request_id, team_context);
+  deps.store.updateTeamMemberStatus(member.member_id, 'running', delivery_id);
+  return decision;
+}
+
+type TeamToolPolicyDecision = { decision: 'ask' } | { decision: 'deny'; reason: string };
+
+function evaluateTeamToolPolicy(
+  member: TeamMemberRecord,
+  tool_name: string,
+  input: unknown,
+): TeamToolPolicyDecision {
+  const action = classifyTeamToolAction(tool_name, input);
+  if (member.file_access === 'read_only') {
+    if (action === 'write') return { decision: 'deny', reason: `${member.role} is read_only and cannot use ${tool_name}` };
+    if (action === 'shell_write') return { decision: 'deny', reason: `${member.role} is read_only and cannot run mutating shell commands` };
+    if (action === 'shell_git') return { decision: 'deny', reason: `${member.role} is read_only and cannot run git commands that alter repository state` };
+    return { decision: 'ask' };
+  }
+
+  if (action === 'write') {
+    const paths = extractToolPaths(input);
+    const outside = paths.find((path) => !isPathInside(member.execution_cwd, path));
+    if (outside) {
+      return {
+        decision: 'deny',
+        reason: `${tool_name} path is outside execution_cwd (${member.execution_cwd}): ${outside}`,
+      };
+    }
+  }
+
+  return { decision: 'ask' };
+}
+
+type TeamToolAction = 'read' | 'write' | 'shell_read' | 'shell_write' | 'shell_git' | 'shell_unknown';
+
+function classifyTeamToolAction(tool_name: string, input: unknown): TeamToolAction {
+  const normalized = tool_name.trim().toLowerCase();
+  if (['write', 'edit', 'multiedit', 'patch'].includes(normalized)) return 'write';
+  if (['read', 'grep', 'glob', 'ls', 'list'].includes(normalized)) return 'read';
+  if (normalized === 'bash' || normalized === 'shell') return classifyShellCommand(extractShellCommand(input));
+  return 'shell_unknown';
+}
+
+function classifyShellCommand(command: string): TeamToolAction {
+  const trimmed = command.trim();
+  if (!trimmed) return 'shell_unknown';
+
+  if (/(^|\s)(>{1,2})\s*\S/.test(trimmed) || /\btee\s+/.test(trimmed)) return 'shell_write';
+  if (/(^|[;&|]\s*)(rm|mv|cp|touch|mkdir|chmod|chown)\b/.test(trimmed)) return 'shell_write';
+  if (/\b(sed\s+-i|perl\s+-pi|npm\s+install|pnpm\s+install|yarn\s+add)\b/.test(trimmed)) return 'shell_write';
+  if (/\bgit\s+(add|commit|merge|rebase|checkout|switch|reset|clean|worktree)\b/.test(trimmed)) return 'shell_git';
+  if (/\bgit\s+branch\s+(-d|-D|--delete)\b/.test(trimmed)) return 'shell_git';
+  if (/^(pwd|ls|cat|grep|rg|find)\b/.test(trimmed)) return 'shell_read';
+  if (/^sed\s+-n\b/.test(trimmed)) return 'shell_read';
+  if (/^git\s+(status|diff|log|show|branch)\b/.test(trimmed)) return 'shell_read';
+  return 'shell_unknown';
+}
+
+function extractShellCommand(input: unknown): string {
+  if (!input || typeof input !== 'object') return '';
+  const command = (input as { command?: unknown }).command;
+  return typeof command === 'string' ? command : '';
+}
+
+function extractToolPaths(input: unknown): string[] {
+  if (!input || typeof input !== 'object') return [];
+  const record = input as Record<string, unknown>;
+  const candidates: unknown[] = [
+    record.file_path,
+    record.filePath,
+    record.path,
+    record.paths,
+    record.resources,
+  ];
+  const paths: string[] = [];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim() !== '') paths.push(candidate.trim());
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        if (typeof item === 'string' && item.trim() !== '') paths.push(item.trim());
+      }
+    }
+  }
+  return paths;
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const resolvedRoot = resolve(root);
+  const resolvedCandidate = isAbsolute(candidate) ? resolve(candidate) : resolve(resolvedRoot, candidate);
+  const rel = relative(resolvedRoot, resolvedCandidate);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 function leaderOnlyPrompt({
@@ -1731,22 +1943,24 @@ function leaderOnlyPrompt({
   includeInitialization,
   text,
   members,
+  team_cwd,
 }: {
   team_name: string;
   leader: TeamMemberRecord;
   includeInitialization: boolean;
   text: string;
   members: TeamWithMembers['members'];
+  team_cwd: string;
 }): string {
   const availableRoles = members.map((member) => member.role);
   const memberLines = members.map((member) => {
     const model = member.model ? `model=${member.model}` : 'model=agent-default';
-    return `- ${member.role}: agent=${member.coding_agent}, ${model}, responsibility=${member.responsibility_prompt}`;
+    return `- ${member.role}: agent=${member.coding_agent}, ${model}, file_access=${member.file_access}, execution_cwd=${member.execution_cwd}, responsibility=${member.responsibility_prompt}`;
   });
 
   return [
     includeInitialization ? 'Member initialization (first delivery only):' : '',
-    includeInitialization ? memberInitializationPrompt(leader) : '',
+    includeInitialization ? memberInitializationPrompt(leader, team_cwd) : '',
     includeInitialization ? '' : '',
     `Team: ${team_name}`,
     `Delivery target: ${leader.role}`,
@@ -1777,7 +1991,7 @@ function leaderOnlyPrompt({
     '{"type":"need_user_input","question":"clear question for the user"}',
     '',
     'Plan shape:',
-    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
+    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task_type":"analysis|review|implementation|fix","requires_file_write":false,"task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
   ].join('\n');
 }
 
@@ -1788,6 +2002,7 @@ function leaderFollowUpPrompt({
   inboxBatch,
   members,
   runItems,
+  team_cwd,
 }: {
   team_name: string;
   leader: TeamMemberRecord;
@@ -1795,11 +2010,12 @@ function leaderFollowUpPrompt({
   inboxBatch: Array<{ delivery: TeamMessageDeliveryRecord; message: TeamMessageRecord }>;
   members: TeamWithMembers['members'];
   runItems: TeamRunWithItems | undefined;
+  team_cwd: string;
 }): string {
   const availableRoles = members.map((member) => member.role);
   const memberLines = members.map((member) => {
     const model = member.model ? `model=${member.model}` : 'model=agent-default';
-    return `- ${member.role}: agent=${member.coding_agent}, ${model}, responsibility=${member.responsibility_prompt}`;
+    return `- ${member.role}: agent=${member.coding_agent}, ${model}, file_access=${member.file_access}, execution_cwd=${member.execution_cwd}, responsibility=${member.responsibility_prompt}`;
   });
   const memberById = new Map(members.map((member) => [member.member_id, member]));
   const batchMessageIds = new Set(inboxBatch.map((item) => item.message.message_id));
@@ -1813,7 +2029,7 @@ function leaderFollowUpPrompt({
 
   return [
     includeInitialization ? 'Member initialization (first delivery only):' : '',
-    includeInitialization ? memberInitializationPrompt(leader) : '',
+    includeInitialization ? memberInitializationPrompt(leader, team_cwd) : '',
     includeInitialization ? '' : '',
     `Team: ${team_name}`,
     `Delivery target: ${leader.role}`,
@@ -1847,7 +2063,7 @@ function leaderFollowUpPrompt({
     '{"type":"need_user_input","question":"clear question for the user"}',
     '',
     'Plan shape:',
-    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
+    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task_type":"analysis|review|implementation|fix","requires_file_write":false,"task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
   ].join('\n');
 }
 
@@ -1891,7 +2107,7 @@ function leaderJsonRetryPrompt(previous: string, error: string): string {
     'Allowed shapes:',
     '{"type":"final","summary":"short summary","result":"final answer for the user"}',
     '{"type":"need_user_input","question":"clear question for the user"}',
-    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
+    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task_type":"analysis|review|implementation|fix","requires_file_write":false,"task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
     '',
     'Strict JSON reminders:',
     '- Escape every double quote inside string values as \\".',
@@ -1947,6 +2163,8 @@ interface ValidatedPlanAssignment {
   to_member_id: string;
   task: string;
   context: string;
+  task_type: string;
+  requires_file_write: boolean;
   delivery_id: string;
   dependencies: Array<{ depends_on_delivery_id: string; dependency_type: TeamDeliveryDependencyType }>;
   depends_on: string[];
@@ -2108,6 +2326,8 @@ function validateLeaderPlan(raw: Record<string, unknown>, members: TeamWithMembe
     to_member_id: string;
     task: string;
     context: string;
+    task_type: string;
+    requires_file_write: boolean;
     depends_on: string[];
     dependency_type: TeamDeliveryDependencyType;
   }> = [];
@@ -2132,6 +2352,15 @@ function validateLeaderPlan(raw: Record<string, unknown>, members: TeamWithMembe
     const task = typeof assignment.task === 'string' ? assignment.task.trim() : '';
     if (!task) return { error: `assignment ${id} task is required` };
     const context = typeof assignment.context === 'string' ? assignment.context.trim() : '';
+    const task_type = typeof assignment.task_type === 'string' ? assignment.task_type.trim().toLowerCase() : '';
+    if (assignment.requires_file_write !== undefined && typeof assignment.requires_file_write !== 'boolean') {
+      return { error: `assignment ${id} requires_file_write must be a boolean` };
+    }
+    const requires_file_write = assignment.requires_file_write === true;
+    const writeRequired = requires_file_write || task_type === 'implementation' || task_type === 'fix';
+    if (writeRequired && member.file_access === 'read_only') {
+      return { error: `assignment ${id} requires file write access but target member ${member.role} is read_only` };
+    }
     const rawDependsOn = assignment.depends_on ?? [];
     if (!Array.isArray(rawDependsOn) || rawDependsOn.some((dep) => typeof dep !== 'string' || dep.trim() === '')) {
       return { error: `assignment ${id} depends_on must be an array of assignment ids` };
@@ -2149,6 +2378,8 @@ function validateLeaderPlan(raw: Record<string, unknown>, members: TeamWithMembe
       to_member_id: member.member_id,
       task,
       context,
+      task_type,
+      requires_file_write,
       depends_on: rawDependsOn.map((dep) => dep.trim()),
       dependency_type,
     });
@@ -2179,6 +2410,8 @@ function assignmentContent(assignment: ValidatedPlanAssignment): string {
     `Assignment ${assignment.id} -> ${assignment.to}`,
     '',
     `Task: ${assignment.task}`,
+    assignment.task_type ? `Task type: ${assignment.task_type}` : '',
+    `Requires file write: ${assignment.requires_file_write ? 'yes' : 'no'}`,
     assignment.context ? `Context: ${assignment.context}` : '',
     assignment.depends_on.length > 0 ? `Depends on: ${assignment.depends_on.join(', ')}` : 'Depends on: none',
   ]
@@ -2193,6 +2426,7 @@ function deliveryPrompt({
   includeInitialization,
   dependencies,
   runItems,
+  team_cwd,
 }: {
   delivery: TeamMessageDeliveryRecord;
   message: TeamMessageRecord;
@@ -2200,6 +2434,7 @@ function deliveryPrompt({
   includeInitialization: boolean;
   dependencies: Array<{ depends_on_delivery_id: string; dependency_type: TeamDeliveryDependencyType }>;
   runItems: TeamRunWithItems | undefined;
+  team_cwd: string;
 }): string {
   const dependencyLines = dependencies.map((dependency) => {
     const upstream = runItems?.deliveries.find((item) => item.delivery_id === dependency.depends_on_delivery_id);
@@ -2217,10 +2452,15 @@ function deliveryPrompt({
 
   return [
     includeInitialization ? 'Member initialization (first delivery only):' : '',
-    includeInitialization ? memberInitializationPrompt(member) : '',
+    includeInitialization ? memberInitializationPrompt(member, team_cwd) : '',
     includeInitialization ? '' : '',
     `New delivery: ${delivery.delivery_id}`,
     `Run: ${delivery.run_id}`,
+    '',
+    'Workspace:',
+    `- File access: ${member.file_access}`,
+    `- Execution cwd: ${member.execution_cwd}`,
+    '- Only operate inside the execution cwd.',
     '',
     'Task:',
     message.content,

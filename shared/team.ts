@@ -17,6 +17,7 @@ export type TeamMessageFromKind = 'user' | 'member' | 'system';
 export type TeamDeliveryStatus = 'blocked' | 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
 export type TeamDeliveryAttemptStatus = 'running' | 'done' | 'failed' | 'cancelled';
 export type TeamDeliveryDependencyType = 'success' | 'finished';
+export type TeamMemberFileAccess = 'read_only' | 'read_write';
 
 export interface TeamRecord {
   team_id: string;
@@ -40,6 +41,10 @@ export interface TeamMemberRecord {
   current_delivery_id: string | null;
   initialized_at: number | null;
   session_missing?: boolean;
+  file_access: TeamMemberFileAccess;
+  execution_cwd: string;
+  worktree_path: string | null;
+  worktree_branch: string | null;
   create_time: number;
   modify_time: number;
 }
@@ -116,6 +121,7 @@ export interface TeamMemberInput {
   agent: AgentId;
   model: string | null;
   responsibility_prompt: string;
+  file_access: TeamMemberFileAccess;
 }
 
 export interface CreateTeamInput {

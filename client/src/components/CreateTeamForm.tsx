@@ -18,7 +18,12 @@ function defaultMember(role: string): TeamMemberInput {
     agent: '',
     model: null,
     responsibility_prompt: ROLE_TEMPLATES[role] ?? '',
+    file_access: defaultFileAccess(role),
   };
+}
+
+function defaultFileAccess(role: string): TeamMemberInput['file_access'] {
+  return role === 'reviewer' || role === 'tester' ? 'read_only' : 'read_write';
 }
 
 export function CreateTeamForm({
@@ -94,6 +99,7 @@ export function CreateTeamForm({
     updateMember(index, {
       role,
       responsibility_prompt: ROLE_TEMPLATES[role] ?? members[index].responsibility_prompt,
+      file_access: defaultFileAccess(role),
     });
   }
 
@@ -210,6 +216,16 @@ export function CreateTeamForm({
                 {modelLookup(cwd, member.agent, modelLookups).error && (
                   <span className="field-help">{modelLookup(cwd, member.agent, modelLookups).error}</span>
                 )}
+              </label>
+              <label className="field">
+                <span className="field-label">File access</span>
+                <select
+                  value={member.file_access}
+                  onChange={(event) => updateMember(index, { file_access: event.target.value as TeamMemberInput['file_access'] })}
+                >
+                  <option value="read_only">Read only</option>
+                  <option value="read_write">Read/write</option>
+                </select>
               </label>
             </div>
             <label className="field">

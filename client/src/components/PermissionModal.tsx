@@ -57,7 +57,7 @@ export function PermissionModal({
             </div>
             <div>
               <dt>Member</dt>
-              <dd>{team.member_role}</dd>
+              <dd>{`${team.member_role} · ${team.member_file_access}`}</dd>
             </div>
             <div>
               <dt>Agent</dt>
@@ -74,6 +74,10 @@ export function PermissionModal({
             <div className="permission-context-wide">
               <dt>CWD</dt>
               <dd>{team.cwd}</dd>
+            </div>
+            <div className="permission-context-wide">
+              <dt>Execution CWD</dt>
+              <dd>{team.execution_cwd}</dd>
             </div>
           </dl>
         )}

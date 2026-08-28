@@ -16,9 +16,11 @@ export interface TeamPermissionContext {
   member_id: string;
   member_role: string;
   member_agent: string;
+  member_file_access: string;
   delivery_id: string;
   session_id: string;
   cwd: string;
+  execution_cwd: string;
 }
 
 export type TeamStreamKind = 'text' | 'thinking' | 'tool' | 'status';

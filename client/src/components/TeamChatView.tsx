@@ -191,6 +191,9 @@ export function TeamChatView({
                 {member.coding_agent}
                 {member.model ? ` · ${member.model}` : ' · default model'}
               </p>
+              <p className="team-member-meta" title={member.execution_cwd}>
+                {member.file_access === 'read_only' ? 'read only' : 'read/write'} · {member.execution_cwd}
+              </p>
               <p className="team-member-session" title={member.session_id}>
                 {member.session_id}
               </p>
@@ -312,6 +315,7 @@ export function TeamChatView({
                               <time dateTime={new Date(item.create_time).toISOString()}>
                                 {new Date(item.create_time).toLocaleTimeString()}
                               </time>
+                              {member ? ` · ${member.file_access} · ${member.execution_cwd}` : ''}
                             </p>
                             {item.text.trim() ? (
                               <pre>{item.text}</pre>
