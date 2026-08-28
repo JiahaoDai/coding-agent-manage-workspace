@@ -1107,3 +1107,7 @@ Agent Team 的核心不是多个聊天窗口，而是一个由 message bus、del
 - delivery retry 和 attempt 展示。
 - worker-to-worker message 和 run 中途用户补充消息。
 - UI展示优化，流程图一样的感觉，分配任务等等展示就和流程图一样，可折叠的形式，更明显的看到消息的传递过程
+
+
+关于agent-team并发问题： reference `docs/agent-team-parellel.md`
+关于agent-team流程导出html： reference `docs/agent-team-message-track.md`
