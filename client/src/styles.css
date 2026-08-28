@@ -1261,6 +1261,20 @@ button {
   border-bottom: 1px solid var(--border);
 }
 
+.team-chat-header-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 10px;
+}
+
+.team-export-btn {
+  min-height: 34px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+}
+
 .team-chat-heading {
   display: flex;
   align-items: center;
@@ -1660,6 +1674,11 @@ button {
 
   .team-chat-header {
     padding: 8px 12px;
+  }
+
+  .team-chat-header-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 }
 

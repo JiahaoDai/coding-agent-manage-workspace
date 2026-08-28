@@ -82,6 +82,8 @@ describe('TeamChatView', () => {
     expect(markup).toContain('session-1');
     expect(markup).toContain('Active delivery delivery');
     expect(markup).toContain('Run activity');
+    expect(markup).toContain('Export Flow');
+    expect(markup).toContain('disabled=""');
     expect(markup).toContain('Resize team roster');
     expect(markup).toContain('No team runs yet.');
     expect(markup).toContain('Send team request');

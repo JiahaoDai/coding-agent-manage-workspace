@@ -16,6 +16,7 @@ import {
   type ConversationMessage,
   type StreamableServerEvent,
 } from './conversation';
+import { buildTeamRunsFlowExportHtml, teamRunsFlowExportFileName } from './teamFlowExport';
 import type { AgentId, ModelOption, PermissionRequest, ServerEvent, SessionRecord, TeamRunWithItems, TeamWithMembers } from './types';
 import {
   closePane,
@@ -374,6 +375,17 @@ function memberStatusForDelivery(status: string): 'idle' | 'running' | 'waiting_
   return 'idle';
 }
 
+function downloadHtmlFile(fileName: string, html: string): void {
+  const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 
 export function App() {
   const [agents, setAgents] = useState<AgentId[]>([]);
@@ -394,6 +406,7 @@ export function App() {
   const [teamDrafts, setTeamDrafts] = useState<Record<string, string>>({});
   const [teamTimeline, setTeamTimeline] = useState<Record<string, TeamTimelineItem[]>>({});
   const [sendingTeamRequest, setSendingTeamRequest] = useState<Record<string, boolean>>({});
+  const [exportingTeamRun, setExportingTeamRun] = useState<Record<string, boolean>>({});
   // Starts on normal prompt submission and ends at the first visible stream
   // event. This is deliberately separate from history: old assistant messages
   // must not suppress the pending feedback for a new turn.
@@ -1129,6 +1142,11 @@ export function App() {
         delete next[teamId];
         return next;
       });
+      setExportingTeamRun((prev) => {
+        const next = { ...prev };
+        delete next[teamId];
+        return next;
+      });
       void listSessions().then(setSessions);
     } catch (err) {
       setTeamDeleteError(err instanceof Error ? err.message : String(err));
@@ -1151,6 +1169,21 @@ export function App() {
     } catch (err) {
       setSendingTeamRequest((prev) => ({ ...prev, [teamId]: false }));
       setTeamDeleteError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleExportTeamRun(team: TeamWithMembers) {
+    setTeamDeleteError(null);
+    setExportingTeamRun((prev) => ({ ...prev, [team.team_id]: true }));
+    try {
+      const runs = await listTeamRuns(team.team_id);
+      setTeamTimeline((prev) => ({ ...prev, [team.team_id]: timelineFromRuns(runs) }));
+      if (runs.length === 0) throw new Error('No team run to export.');
+      downloadHtmlFile(teamRunsFlowExportFileName(team, runs), buildTeamRunsFlowExportHtml(team, runs));
+    } catch (err) {
+      setTeamDeleteError(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setExportingTeamRun((prev) => ({ ...prev, [team.team_id]: false }));
     }
   }
 
@@ -1275,11 +1308,14 @@ export function App() {
             draft={teamDrafts[selectedTeamId] ?? ''}
             items={teamTimeline[selectedTeamId] ?? []}
             sending={sendingTeamRequest[selectedTeamId] ?? false}
+            canExport={(teamTimeline[selectedTeamId] ?? []).length > 0}
+            exporting={exportingTeamRun[selectedTeamId] ?? false}
             pendingPermission={
               pendingPermission?.team_context?.team_id === selectedTeamId ? pendingPermission.team_context : null
             }
             onDraftChange={(text) => setTeamDrafts((prev) => ({ ...prev, [selectedTeamId]: text }))}
             onSubmit={(text) => void handleTeamSubmit(selectedTeamId, text)}
+            onExport={selectedTeam ? () => void handleExportTeamRun(selectedTeam) : undefined}
           />
         ) : visiblePanels.length > 0 ? (
           <div

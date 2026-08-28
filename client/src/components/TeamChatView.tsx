@@ -37,8 +37,11 @@ export function TeamChatView({
   items = [],
   sending = false,
   pendingPermission = null,
+  canExport = false,
+  exporting = false,
   onDraftChange,
   onSubmit,
+  onExport,
 }: {
   team: TeamWithMembers | null;
   loading?: boolean;
@@ -47,8 +50,11 @@ export function TeamChatView({
   items?: TeamTimelineItem[];
   sending?: boolean;
   pendingPermission?: TeamPermissionContext | null;
+  canExport?: boolean;
+  exporting?: boolean;
   onDraftChange: (text: string) => void;
   onSubmit: (text: string) => void;
+  onExport?: () => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -146,7 +152,18 @@ export function TeamChatView({
             {team.cwd}
           </span>
         </nav>
-        <span className={`team-status team-status-${team.status}`}>{team.status}</span>
+        <div className="team-chat-header-actions">
+          <button
+            type="button"
+            className="btn btn-secondary team-export-btn"
+            disabled={!canExport || exporting}
+            onClick={onExport}
+          >
+            <ExportIcon />
+            {exporting ? 'Exporting...' : 'Export Flow'}
+          </button>
+          <span className={`team-status team-status-${team.status}`}>{team.status}</span>
+        </div>
       </header>
 
       {deleteError && (
@@ -472,6 +489,24 @@ function TeamIcon() {
       <circle cx="9" cy="7" r="4" />
       <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
       <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
+  );
+}
+
+function ExportIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 3v12" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M5 21h14" />
     </svg>
   );
 }
