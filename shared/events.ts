@@ -2,6 +2,7 @@ import type { ShellCommandResult } from './adapter';
 import type { SessionRecord, SessionStatus } from './session';
 import type {
   TeamDeliveryStatus,
+  TeamDeliveryAttemptRecord,
   TeamDeliveryDependencyRecord,
   TeamMessageDeliveryRecord,
   TeamMessageRecord,
@@ -46,6 +47,7 @@ export type ServerEvent =
       run: TeamRunRecord;
       user_message: TeamMessageRecord;
       delivery: TeamMessageDeliveryRecord;
+      attempt?: TeamDeliveryAttemptRecord | null;
     }
   | {
       type: 'team_delivery_status_change';
@@ -53,6 +55,7 @@ export type ServerEvent =
       team_id: string;
       run_id: string;
       delivery_id: string;
+      attempt_id?: string | null;
       member_id: string;
       status: TeamDeliveryStatus;
     }
@@ -62,6 +65,7 @@ export type ServerEvent =
       team_id: string;
       run_id: string;
       delivery_id: string;
+      attempt_id?: string | null;
       member_id: string;
       text: string;
       stream_kind: TeamStreamKind;
@@ -81,6 +85,7 @@ export type ServerEvent =
       run: TeamRunRecord;
       question_message: TeamMessageRecord;
       delivery: TeamMessageDeliveryRecord;
+      attempt?: TeamDeliveryAttemptRecord | null;
     }
   | {
       type: 'team_run_resumed';
@@ -89,6 +94,7 @@ export type ServerEvent =
       run: TeamRunRecord;
       user_message: TeamMessageRecord;
       delivery: TeamMessageDeliveryRecord;
+      attempt?: TeamDeliveryAttemptRecord | null;
     }
   | {
       type: 'team_plan_created';
@@ -98,6 +104,7 @@ export type ServerEvent =
       plan_message: TeamMessageRecord;
       assignment_messages: TeamMessageRecord[];
       deliveries: TeamMessageDeliveryRecord[];
+      attempts?: TeamDeliveryAttemptRecord[];
       dependencies: TeamDeliveryDependencyRecord[];
     }
   | {
@@ -106,6 +113,7 @@ export type ServerEvent =
       team_id: string;
       message: TeamMessageRecord;
       delivery: TeamMessageDeliveryRecord | null;
+      attempt?: TeamDeliveryAttemptRecord | null;
     }
   | {
       type: 'team_run_failed';

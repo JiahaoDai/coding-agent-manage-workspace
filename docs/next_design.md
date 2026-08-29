@@ -36,3 +36,14 @@ test
 自动分发任务，agent之间能够互相进行通信。
 
 目前是，查询有哪些team member，后续自动创建team member来处理
+
+
+### UI 风格
+lighting
+dark
+相关字体颜色也需要一并改变，要不然看不见
+
+### agent team流程图展示
+
+### session 和 agent team分开
+侧边栏转换查看 agent team 和 session

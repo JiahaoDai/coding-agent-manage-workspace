@@ -1,8 +1,8 @@
-# 13: Enable configurable cross-member parallelism
+# 16: Enable configurable cross-member parallelism
 
 **What to build:** Allow a team to opt into running multiple members at the same time by increasing `max_parallel_members`, while preserving single-member serialization, dependency gating, and clear UI status.
 
-**Blocked by:** 11: Persist and reload team run history.
+**Blocked by:** 15: Process leader inbox as an aggregation batch.
 
 **Status:** ready-for-agent
 

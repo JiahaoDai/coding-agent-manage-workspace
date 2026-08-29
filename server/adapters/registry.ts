@@ -16,4 +16,14 @@ export class AdapterRegistry {
   list(): AgentId[] {
     return [...this.adapters.keys()];
   }
+
+  async closeAll(): Promise<void> {
+    for (const [id, adapter] of this.adapters.entries()) {
+      try {
+        await adapter.close?.();
+      } catch (err) {
+        console.warn(`Failed to close ${id} adapter`, err);
+      }
+    }
+  }
 }

@@ -1,6 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type { SessionRecord, SessionStatus } from '../shared/session';
 import type {
+  TeamDeliveryAttemptRecord,
+  TeamDeliveryAttemptStatus,
   TeamDeliveryStatus,
   TeamDeliveryDependencyRecord,
   TeamDeliveryDependencyType,
@@ -59,6 +62,7 @@ export class SessionStore {
         responsibility_prompt TEXT NOT NULL,
         status                TEXT NOT NULL,
         current_delivery_id   TEXT,
+        initialized_at        INTEGER,
         create_time           INTEGER NOT NULL,
         modify_time           INTEGER NOT NULL,
         UNIQUE(team_id, role)
@@ -111,7 +115,9 @@ export class SessionStore {
         created_at   INTEGER NOT NULL,
         started_at   INTEGER,
         finished_at  INTEGER,
-        error        TEXT
+        error        TEXT,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        retry_after  INTEGER
       );
 
       CREATE INDEX IF NOT EXISTS idx_team_delivery_run
@@ -126,6 +132,21 @@ export class SessionStore {
 
       CREATE INDEX IF NOT EXISTS idx_team_dependency_upstream
         ON team_delivery_dependency (depends_on_delivery_id);
+
+      CREATE TABLE IF NOT EXISTS team_delivery_attempt (
+        attempt_id     TEXT PRIMARY KEY,
+        delivery_id    TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        status         TEXT NOT NULL,
+        started_at     INTEGER NOT NULL,
+        finished_at    INTEGER,
+        output         TEXT,
+        error          TEXT,
+        UNIQUE(delivery_id, attempt_number)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_team_attempt_delivery
+        ON team_delivery_attempt (delivery_id, attempt_number);
     `);
 
     // `CREATE TABLE IF NOT EXISTS` cannot amend installations created before
@@ -137,6 +158,21 @@ export class SessionStore {
     }
     if (!columns.some((column) => column.name === 'model')) {
       db.exec(`ALTER TABLE session ADD COLUMN model TEXT`);
+    }
+    const deliveryColumns = db.prepare(`PRAGMA table_info(team_message_delivery)`).all() as Array<{ name: string }>;
+    if (!deliveryColumns.some((column) => column.name === 'max_attempts')) {
+      db.exec(`ALTER TABLE team_message_delivery ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3`);
+    }
+    if (!deliveryColumns.some((column) => column.name === 'retry_after')) {
+      db.exec(`ALTER TABLE team_message_delivery ADD COLUMN retry_after INTEGER`);
+    }
+    const attemptColumns = db.prepare(`PRAGMA table_info(team_delivery_attempt)`).all() as Array<{ name: string }>;
+    if (!attemptColumns.some((column) => column.name === 'output')) {
+      db.exec(`ALTER TABLE team_delivery_attempt ADD COLUMN output TEXT`);
+    }
+    const memberColumns = db.prepare(`PRAGMA table_info(team_member)`).all() as Array<{ name: string }>;
+    if (!memberColumns.some((column) => column.name === 'initialized_at')) {
+      db.exec(`ALTER TABLE team_member ADD COLUMN initialized_at INTEGER`);
     }
   }
 
@@ -222,6 +258,17 @@ export class SessionStore {
       .run(status, current_delivery_id, Date.now(), member_id);
   }
 
+  markTeamMemberInitialized(member_id: string, now: number = Date.now()): TeamMemberRecord | undefined {
+    this.db
+      .prepare(
+        `UPDATE team_member
+         SET initialized_at = COALESCE(initialized_at, ?), modify_time = ?
+         WHERE member_id = ?`,
+      )
+      .run(now, now, member_id);
+    return this.getTeamMember(member_id);
+  }
+
   delete(session_id: string): void {
     this.db.prepare(`DELETE FROM session WHERE session_id = ?`).run(session_id);
   }
@@ -247,10 +294,10 @@ export class SessionStore {
       const insertMember = this.db.prepare(
         `INSERT INTO team_member
            (member_id, team_id, role, coding_agent, session_id, model, responsibility_prompt,
-            status, current_delivery_id, create_time, modify_time)
+            status, current_delivery_id, initialized_at, create_time, modify_time)
          VALUES
            (@member_id, @team_id, @role, @coding_agent, @session_id, @model, @responsibility_prompt,
-            @status, @current_delivery_id, @create_time, @modify_time)`,
+            @status, @current_delivery_id, @initialized_at, @create_time, @modify_time)`,
       );
       const insertQueue = this.db.prepare(`INSERT INTO team_member_queue (member_id, next_seq) VALUES (?, 1)`);
       for (const member of members) {
@@ -300,6 +347,12 @@ export class SessionStore {
       this.db
         .prepare(
           `DELETE FROM team_delivery_dependency
+           WHERE delivery_id IN (SELECT delivery_id FROM team_message_delivery WHERE team_id = ?)`,
+        )
+        .run(team_id);
+      this.db
+        .prepare(
+          `DELETE FROM team_delivery_attempt
            WHERE delivery_id IN (SELECT delivery_id FROM team_message_delivery WHERE team_id = ?)`,
         )
         .run(team_id);
@@ -356,13 +409,15 @@ export class SessionStore {
         started_at: null,
         finished_at: null,
         error: null,
+        max_attempts: 3,
+        retry_after: null,
       };
 
       this.insertTeamRun(run);
       this.insertTeamMessage(message);
       this.insertTeamDelivery(delivery);
       this.updateTeamStatus(input.team_id, 'running');
-      return { run, messages: [message], deliveries: [delivery], dependencies: [] };
+      return { run, messages: [message], deliveries: [delivery], attempts: [], dependencies: [] };
     });
 
     return create();
@@ -381,6 +436,7 @@ export class SessionStore {
         run,
         messages: this.listTeamMessages(run.run_id),
         deliveries: this.listTeamDeliveries(run.run_id),
+        attempts: this.listTeamDeliveryAttempts(run.run_id),
         dependencies: this.listTeamDependencies(run.run_id),
       };
     });
@@ -399,6 +455,7 @@ export class SessionStore {
       run,
       messages: this.listTeamMessages(run_id),
       deliveries: this.listTeamDeliveries(run_id),
+      attempts: this.listTeamDeliveryAttempts(run_id),
       dependencies: this.listTeamDependencies(run_id),
     };
   }
@@ -417,12 +474,108 @@ export class SessionStore {
       .run(status, status, now, status, now, error, delivery_id);
   }
 
+  startTeamDeliveryAttempt(delivery_id: string): { delivery: TeamMessageDeliveryRecord; attempt: TeamDeliveryAttemptRecord } | undefined {
+    const start = this.db.transaction(() => {
+      const row = this.getTeamDeliveryRow(delivery_id);
+      if (!row || row.status !== 'pending') return undefined;
+
+      const now = Date.now();
+      const attempt = this.createTeamDeliveryAttempt(delivery_id, now);
+      this.db
+        .prepare(
+          `UPDATE team_message_delivery
+           SET status = 'running',
+               started_at = CASE WHEN started_at IS NULL THEN ? ELSE started_at END,
+               retry_after = NULL,
+               error = NULL
+           WHERE delivery_id = ? AND status = 'pending'`,
+        )
+        .run(now, delivery_id);
+
+      return {
+        delivery: toTeamDelivery({ ...row, status: 'running', started_at: row.started_at ?? now, error: null, retry_after: null }),
+        attempt,
+      };
+    });
+
+    return start();
+  }
+
+  finishTeamDeliveryAttempt(input: {
+    delivery_id: string;
+    attempt_id: string;
+    status: Exclude<TeamDeliveryAttemptStatus, 'running'>;
+    error: string | null;
+    output?: string | null;
+    retry_after?: number | null;
+  }): { delivery: TeamMessageDeliveryRecord; attempt: TeamDeliveryAttemptRecord } | undefined {
+    const finish = this.db.transaction(() => {
+      const attemptRow = this.db
+        .prepare(
+          `SELECT attempt_id, delivery_id, attempt_number, status, started_at, finished_at, output, error
+           FROM team_delivery_attempt
+           WHERE attempt_id = ? AND delivery_id = ?`,
+        )
+        .get(input.attempt_id, input.delivery_id) as TeamDeliveryAttemptRow | undefined;
+      const deliveryRow = this.getTeamDeliveryRow(input.delivery_id);
+      if (!attemptRow || !deliveryRow) return undefined;
+
+      const now = Date.now();
+      this.db
+        .prepare(
+          `UPDATE team_delivery_attempt
+           SET status = ?, finished_at = ?, output = ?, error = ?
+           WHERE attempt_id = ?`,
+        )
+        .run(input.status, now, input.output ?? null, input.error, input.attempt_id);
+
+      const deliveryStatus: TeamDeliveryStatus =
+        input.status === 'failed' && input.retry_after !== undefined && input.retry_after !== null ? 'pending' : input.status;
+      this.db
+        .prepare(
+          `UPDATE team_message_delivery
+           SET status = ?,
+               finished_at = CASE WHEN ? IN ('done', 'failed', 'cancelled') THEN ? ELSE NULL END,
+               error = ?,
+               retry_after = ?
+           WHERE delivery_id = ?`,
+        )
+        .run(
+          deliveryStatus,
+          deliveryStatus,
+          now,
+          input.error,
+          deliveryStatus === 'pending' ? input.retry_after ?? null : null,
+          input.delivery_id,
+        );
+
+      return {
+        delivery: toTeamDelivery({
+          ...deliveryRow,
+          status: deliveryStatus,
+          finished_at: deliveryStatus === 'pending' ? null : now,
+          error: input.error,
+          retry_after: deliveryStatus === 'pending' ? input.retry_after ?? null : null,
+        }),
+        attempt: toTeamDeliveryAttempt({
+          ...attemptRow,
+          status: input.status,
+          finished_at: now,
+          output: input.output ?? null,
+          error: input.error,
+        }),
+      };
+    });
+
+    return finish();
+  }
+
   releaseSatisfiedBlockedDeliveries(run_id: string): TeamMessageDeliveryRecord[] {
     const release = this.db.transaction(() => {
       const rows = this.db
         .prepare(
           `SELECT delivery_id, message_id, team_id, run_id, to_member_id, status, enqueue_seq,
-                  created_at, started_at, finished_at, error
+                  created_at, started_at, finished_at, error, max_attempts, retry_after
            FROM team_message_delivery delivery
            WHERE delivery.run_id = ?
              AND delivery.status = 'blocked'
@@ -452,6 +605,7 @@ export class SessionStore {
 
   claimNextRunnableTeamDelivery(run_id: string): {
     delivery: TeamMessageDeliveryRecord;
+    attempt: TeamDeliveryAttemptRecord;
     message: TeamMessageRecord;
     member: TeamMemberRecord;
   } | undefined;
@@ -460,6 +614,7 @@ export class SessionStore {
     options: { includeLeader: false },
   ): {
     delivery: TeamMessageDeliveryRecord;
+    attempt: TeamDeliveryAttemptRecord;
     message: TeamMessageRecord;
     member: TeamMemberRecord;
   } | undefined;
@@ -468,6 +623,7 @@ export class SessionStore {
     options: { includeLeader: boolean } = { includeLeader: true },
   ): {
     delivery: TeamMessageDeliveryRecord;
+    attempt: TeamDeliveryAttemptRecord;
     message: TeamMessageRecord;
     member: TeamMemberRecord;
   } | undefined {
@@ -486,11 +642,12 @@ export class SessionStore {
         .prepare(
           `SELECT delivery.delivery_id, delivery.message_id, delivery.team_id, delivery.run_id,
                   delivery.to_member_id, delivery.status, delivery.enqueue_seq, delivery.created_at,
-                  delivery.started_at, delivery.finished_at, delivery.error
+                  delivery.started_at, delivery.finished_at, delivery.error, delivery.max_attempts, delivery.retry_after
            FROM team_message_delivery delivery
            JOIN team_member member ON member.member_id = delivery.to_member_id
            WHERE delivery.run_id = ?
              AND delivery.status = 'pending'
+             AND (delivery.retry_after IS NULL OR delivery.retry_after <= ?)
              AND member.status = 'idle'
              AND (? = 1 OR member.role != 'leader')
              AND NOT EXISTS (
@@ -507,15 +664,17 @@ export class SessionStore {
            ORDER BY delivery.created_at ASC, delivery.enqueue_seq ASC, delivery.delivery_id ASC
            LIMIT 1`,
         )
-        .get(run_id, options.includeLeader ? 1 : 0) as TeamDeliveryRow | undefined;
+        .get(run_id, Date.now(), options.includeLeader ? 1 : 0) as TeamDeliveryRow | undefined;
       if (!row) return undefined;
 
       const now = Date.now();
+      const attempt = this.createTeamDeliveryAttempt(row.delivery_id, now);
       this.db
         .prepare(
           `UPDATE team_message_delivery
            SET status = 'running',
                started_at = CASE WHEN started_at IS NULL THEN ? ELSE started_at END,
+               retry_after = NULL,
                error = NULL
            WHERE delivery_id = ? AND status = 'pending'`,
         )
@@ -525,7 +684,8 @@ export class SessionStore {
         .run(row.delivery_id, now, row.to_member_id);
 
       return {
-        delivery: toTeamDelivery({ ...row, status: 'running', started_at: row.started_at ?? now, error: null }),
+        delivery: toTeamDelivery({ ...row, status: 'running', started_at: row.started_at ?? now, error: null, retry_after: null }),
+        attempt,
         message: this.getTeamMessage(row.message_id)!,
         member: this.getTeamMember(row.to_member_id)!,
       };
@@ -534,11 +694,102 @@ export class SessionStore {
     return claim();
   }
 
+  hasActiveNonLeaderTeamDeliveries(run_id: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1
+         FROM team_message_delivery delivery
+         JOIN team_member member ON member.member_id = delivery.to_member_id
+         WHERE delivery.run_id = ?
+           AND member.role != 'leader'
+           AND delivery.status IN ('pending', 'running')
+         LIMIT 1`,
+      )
+      .get(run_id);
+    return Boolean(row);
+  }
+
+  listLeaderInboxBatch(input: {
+    run_id: string;
+    leader_member_id: string;
+    primary_delivery_id: string;
+  }): Array<{ delivery: TeamMessageDeliveryRecord; message: TeamMessageRecord }> {
+    const rows = this.db
+      .prepare(
+        `SELECT delivery.delivery_id, delivery.message_id, delivery.team_id, delivery.run_id,
+                delivery.to_member_id, delivery.status, delivery.enqueue_seq, delivery.created_at,
+                delivery.started_at, delivery.finished_at, delivery.error, delivery.max_attempts, delivery.retry_after,
+                message.message_id AS msg_message_id, message.team_id AS msg_team_id,
+                message.run_id AS msg_run_id, message.from_member_id AS msg_from_member_id,
+                message.from_kind AS msg_from_kind, message.kind AS msg_kind,
+                message.content AS msg_content, message.create_time AS msg_create_time
+         FROM team_message_delivery delivery
+         JOIN team_message message ON message.message_id = delivery.message_id
+         WHERE delivery.run_id = ?
+           AND delivery.to_member_id = ?
+           AND (
+             delivery.delivery_id = ?
+             OR (
+               delivery.status = 'pending'
+               AND message.kind IN ('result', 'review', 'error', 'proposal')
+             )
+           )
+         ORDER BY delivery.created_at ASC, delivery.enqueue_seq ASC, delivery.delivery_id ASC`,
+      )
+      .all(input.run_id, input.leader_member_id, input.primary_delivery_id) as Array<
+      TeamDeliveryRow & {
+        msg_message_id: string;
+        msg_team_id: string;
+        msg_run_id: string;
+        msg_from_member_id: string | null;
+        msg_from_kind: TeamMessageRecord['from_kind'];
+        msg_kind: TeamMessageRecord['kind'];
+        msg_content: string;
+        msg_create_time: number;
+      }
+    >;
+
+    return rows.map((row) => ({
+      delivery: toTeamDelivery(row),
+      message: toTeamMessage({
+        message_id: row.msg_message_id,
+        team_id: row.msg_team_id,
+        run_id: row.msg_run_id,
+        from_member_id: row.msg_from_member_id,
+        from_kind: row.msg_from_kind,
+        kind: row.msg_kind,
+        content: row.msg_content,
+        create_time: row.msg_create_time,
+      }),
+    }));
+  }
+
+  markPendingTeamDeliveriesDone(delivery_ids: string[]): TeamMessageDeliveryRecord[] {
+    if (delivery_ids.length === 0) return [];
+    const finish = this.db.transaction(() => {
+      const now = Date.now();
+      const update = this.db.prepare(
+        `UPDATE team_message_delivery
+         SET status = 'done', finished_at = ?, retry_after = NULL, error = NULL
+         WHERE delivery_id = ? AND status = 'pending'`,
+      );
+      const rows: TeamMessageDeliveryRecord[] = [];
+      for (const delivery_id of delivery_ids) {
+        update.run(now, delivery_id);
+        const row = this.getTeamDeliveryRow(delivery_id);
+        if (row) rows.push(toTeamDelivery(row));
+      }
+      return rows;
+    });
+
+    return finish();
+  }
+
   getTeamMember(member_id: string): TeamMemberRecord | undefined {
     const row = this.db
       .prepare(
         `SELECT member_id, team_id, role, coding_agent, session_id, model, responsibility_prompt,
-                status, current_delivery_id, create_time, modify_time
+                status, current_delivery_id, initialized_at, create_time, modify_time
          FROM team_member WHERE member_id = ?`,
       )
       .get(member_id) as TeamMemberRow | undefined;
@@ -611,7 +862,7 @@ export class SessionStore {
       const rows = this.db
         .prepare(
           `SELECT delivery_id, message_id, team_id, run_id, to_member_id, status, enqueue_seq,
-                  created_at, started_at, finished_at, error
+                  created_at, started_at, finished_at, error, max_attempts, retry_after
            FROM team_message_delivery
            WHERE run_id = ?
              AND status IN ('blocked', 'pending')
@@ -624,11 +875,17 @@ export class SessionStore {
       const now = Date.now();
       const update = this.db.prepare(
         `UPDATE team_message_delivery
-         SET status = 'cancelled', finished_at = ?
+         SET status = 'cancelled', finished_at = ?, retry_after = NULL
          WHERE delivery_id = ?`,
       );
       for (const row of rows) update.run(now, row.delivery_id);
-      return rows.map((row) => toTeamDelivery({ ...row, status: 'cancelled', finished_at: now }));
+      const cancelAttempt = this.db.prepare(
+        `UPDATE team_delivery_attempt
+         SET status = 'cancelled', finished_at = ?
+         WHERE delivery_id = ? AND status = 'running'`,
+      );
+      for (const row of rows) cancelAttempt.run(now, row.delivery_id);
+      return rows.map((row) => toTeamDelivery({ ...row, status: 'cancelled', finished_at: now, retry_after: null }));
     });
 
     return cancel();
@@ -751,6 +1008,8 @@ export class SessionStore {
         started_at: null,
         finished_at: null,
         error: null,
+        max_attempts: 3,
+        retry_after: null,
       };
 
       this.insertTeamMessage(message);
@@ -802,6 +1061,8 @@ export class SessionStore {
         started_at: null,
         finished_at: null,
         error: null,
+        max_attempts: 3,
+        retry_after: null,
       };
 
       this.insertTeamMessage(message);
@@ -872,6 +1133,8 @@ export class SessionStore {
           started_at: null,
           finished_at: null,
           error: null,
+          max_attempts: 3,
+          retry_after: null,
         };
 
         this.insertTeamMessage(message);
@@ -901,6 +1164,7 @@ export class SessionStore {
       .prepare(
         `SELECT member.member_id, member.team_id, member.role, member.coding_agent, member.session_id,
                 member.model, member.responsibility_prompt, member.status, member.current_delivery_id,
+                member.initialized_at,
                 member.create_time, member.modify_time,
                 CASE WHEN session.session_id IS NULL THEN 1 ELSE 0 END AS session_missing
          FROM team_member member
@@ -937,12 +1201,12 @@ export class SessionStore {
   private insertTeamDelivery(delivery: TeamMessageDeliveryRecord): void {
     this.db
       .prepare(
-        `INSERT INTO team_message_delivery
+          `INSERT INTO team_message_delivery
            (delivery_id, message_id, team_id, run_id, to_member_id, status, enqueue_seq,
-            created_at, started_at, finished_at, error)
+            created_at, started_at, finished_at, error, max_attempts, retry_after)
          VALUES
            (@delivery_id, @message_id, @team_id, @run_id, @to_member_id, @status, @enqueue_seq,
-            @created_at, @started_at, @finished_at, @error)`,
+            @created_at, @started_at, @finished_at, @error, @max_attempts, @retry_after)`,
       )
       .run(delivery);
   }
@@ -967,6 +1231,45 @@ export class SessionStore {
     return row.next_seq;
   }
 
+  private createTeamDeliveryAttempt(delivery_id: string, now: number): TeamDeliveryAttemptRecord {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(attempt_number), 0) + 1 AS attempt_number
+         FROM team_delivery_attempt
+         WHERE delivery_id = ?`,
+      )
+      .get(delivery_id) as { attempt_number: number };
+    const attempt: TeamDeliveryAttemptRecord = {
+      attempt_id: randomUUID(),
+      delivery_id,
+      attempt_number: row.attempt_number,
+      status: 'running',
+      started_at: now,
+      finished_at: null,
+      output: null,
+      error: null,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO team_delivery_attempt
+           (attempt_id, delivery_id, attempt_number, status, started_at, finished_at, output, error)
+         VALUES
+           (@attempt_id, @delivery_id, @attempt_number, @status, @started_at, @finished_at, @output, @error)`,
+      )
+      .run(attempt);
+    return attempt;
+  }
+
+  private getTeamDeliveryRow(delivery_id: string): TeamDeliveryRow | undefined {
+    return this.db
+      .prepare(
+        `SELECT delivery_id, message_id, team_id, run_id, to_member_id, status, enqueue_seq,
+                created_at, started_at, finished_at, error, max_attempts, retry_after
+         FROM team_message_delivery WHERE delivery_id = ?`,
+      )
+      .get(delivery_id) as TeamDeliveryRow | undefined;
+  }
+
   private listTeamMessages(run_id: string): TeamMessageRecord[] {
     const rows = this.db
       .prepare(
@@ -981,11 +1284,25 @@ export class SessionStore {
     const rows = this.db
       .prepare(
         `SELECT delivery_id, message_id, team_id, run_id, to_member_id, status, enqueue_seq,
-                created_at, started_at, finished_at, error
+                created_at, started_at, finished_at, error, max_attempts, retry_after
          FROM team_message_delivery WHERE run_id = ? ORDER BY created_at ASC, enqueue_seq ASC, delivery_id ASC`,
       )
       .all(run_id) as TeamDeliveryRow[];
     return rows.map(toTeamDelivery);
+  }
+
+  private listTeamDeliveryAttempts(run_id: string): TeamDeliveryAttemptRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT attempt.attempt_id, attempt.delivery_id, attempt.attempt_number, attempt.status,
+                attempt.started_at, attempt.finished_at, attempt.output, attempt.error
+         FROM team_delivery_attempt attempt
+         JOIN team_message_delivery delivery ON delivery.delivery_id = attempt.delivery_id
+         WHERE delivery.run_id = ?
+         ORDER BY delivery.created_at ASC, attempt.attempt_number ASC`,
+      )
+      .all(run_id) as TeamDeliveryAttemptRow[];
+    return rows.map(toTeamDeliveryAttempt);
   }
 
   private listTeamDependencies(run_id: string): TeamDeliveryDependencyRecord[] {
@@ -1039,6 +1356,7 @@ interface TeamMemberRow {
   responsibility_prompt: string;
   status: TeamMemberRecord['status'];
   current_delivery_id: string | null;
+  initialized_at: number | null;
   session_missing?: 0 | 1;
   create_time: number;
   modify_time: number;
@@ -1078,6 +1396,19 @@ interface TeamDeliveryRow {
   started_at: number | null;
   finished_at: number | null;
   error: string | null;
+  max_attempts: number;
+  retry_after: number | null;
+}
+
+interface TeamDeliveryAttemptRow {
+  attempt_id: string;
+  delivery_id: string;
+  attempt_number: number;
+  status: TeamDeliveryAttemptRecord['status'];
+  started_at: number;
+  finished_at: number | null;
+  output: string | null;
+  error: string | null;
 }
 
 interface TeamDependencyRow {
@@ -1104,6 +1435,10 @@ function toTeamMessage(row: TeamMessageRow): TeamMessageRecord {
 }
 
 function toTeamDelivery(row: TeamDeliveryRow): TeamMessageDeliveryRecord {
+  return { ...row };
+}
+
+function toTeamDeliveryAttempt(row: TeamDeliveryAttemptRow): TeamDeliveryAttemptRecord {
   return { ...row };
 }
 

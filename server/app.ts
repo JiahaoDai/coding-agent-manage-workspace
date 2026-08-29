@@ -7,10 +7,11 @@ import { createFsTree, FsPathError, type FsTree } from './fs/tree';
 import { PermissionBroker } from './permission';
 import type { SseHub } from './sse';
 import type { AgentAdapter, PromptHandlers } from '../shared/adapter';
-import type { TeamPermissionContext } from '../shared/events';
+import type { TeamPermissionContext, TeamStreamKind } from '../shared/events';
 import type { ResumableSession, SessionRecord } from '../shared/session';
 import type {
   CreateTeamInput,
+  TeamDeliveryAttemptRecord,
   TeamDeliveryDependencyType,
   TeamMemberInput,
   TeamMemberRecord,
@@ -29,7 +30,11 @@ export interface AppDeps {
   sse: SseHub;
   /** In-app file tree for choosing a working directory. Defaults to ~ (see createFsTree). */
   fs?: FsTree;
+  /** Delivery retry backoff in milliseconds. Defaults to 30s, then 60s. */
+  deliveryRetryBackoffMs?: number[];
 }
+
+const DEFAULT_DELIVERY_RETRY_BACKOFF_MS = [30_000, 60_000];
 
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
@@ -211,8 +216,6 @@ export function createApp(deps: AppDeps): Hono {
           if (!selected.supported) return c.json({ error: `model selection failed for member ${member.role}: ${selected.reason}` }, 409);
         }
 
-        await adapter.prompt(real_session_id, cwd, memberInitializationPrompt(member), initializationHandlers(member.role));
-
         sessions.push({
           session_id,
           coding_agent: member.agent,
@@ -235,6 +238,7 @@ export function createApp(deps: AppDeps): Hono {
           responsibility_prompt: member.responsibility_prompt,
           status: 'idle',
           current_delivery_id: null,
+          initialized_at: null,
           create_time: now + teamMembers.length,
           modify_time: now + teamMembers.length,
         });
@@ -571,19 +575,27 @@ async function runLeaderOnlyDelivery({
   team_members: TeamWithMembers['members'];
 }): Promise<void> {
   const output: string[] = [];
-  const broadcastLeaderText = (text: string, stream_kind: 'text' | 'thinking' | 'tool' | 'status' = 'text', stream_label?: string) =>
-    deps.sse.broadcast({
-      type: 'team_text_delta',
+  const started = deps.store.startTeamDeliveryAttempt(delivery_id);
+  if (!started) {
+    deps.store.updateTeamStatus(team_id, 'error');
+    deps.store.recordError(session.session_id, 'leader delivery was not pending');
+    deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'error' });
+    return;
+  }
+  const attempt = started.attempt;
+  const broadcastLeaderText = (text: string, stream_kind: TeamStreamKind = 'text', stream_label?: string) =>
+    broadcastTeamTextDelta({
+      deps,
       team_id,
       run_id: run.run_id,
       delivery_id,
+      attempt_id: attempt.attempt_id,
       member_id: leader.member_id,
       text,
       stream_kind,
       stream_label,
-    });
+  });
 
-  deps.store.updateTeamDeliveryStatus(delivery_id, 'running');
   deps.store.updateTeamMemberStatus(leader.member_id, 'running', delivery_id);
   deps.store.updateStatus(session.session_id, 'running');
   deps.sse.broadcast({
@@ -591,6 +603,7 @@ async function runLeaderOnlyDelivery({
     team_id,
     run_id: run.run_id,
     delivery_id,
+    attempt_id: attempt.attempt_id,
     member_id: leader.member_id,
     status: 'running',
   });
@@ -637,10 +650,12 @@ async function runLeaderOnlyDelivery({
   };
 
   try {
+    const includeInitialization = leader.initialized_at === null;
+    const activeLeader = includeInitialization ? deps.store.markTeamMemberInitialized(leader.member_id) ?? leader : leader;
     await adapter.prompt(
       session.real_session_id,
       cwd,
-      leaderOnlyPrompt({ team_name, leader, text, members: team_members }),
+      leaderOnlyPrompt({ team_name, leader: activeLeader, includeInitialization, text, members: team_members }),
       handlers,
     );
 
@@ -694,7 +709,7 @@ async function runLeaderOnlyDelivery({
         now: Date.now(),
       });
 
-      deps.store.updateTeamDeliveryStatus(delivery_id, 'done');
+      deps.store.finishTeamDeliveryAttempt({ delivery_id, attempt_id: attempt.attempt_id, status: 'done', output: output.join(''), error: null });
       deps.store.updateTeamMemberStatus(leader.member_id, 'idle', null);
       const current = deps.store.get(session.session_id);
       if (current && current.status === 'running') {
@@ -706,6 +721,7 @@ async function runLeaderOnlyDelivery({
         team_id,
         run_id: run.run_id,
         delivery_id,
+        attempt_id: attempt.attempt_id,
         member_id: leader.member_id,
         status: 'done',
       });
@@ -735,6 +751,8 @@ async function runLeaderOnlyDelivery({
         leader,
         session,
         delivery_id,
+        attempt_id: attempt.attempt_id,
+        attempt_output: output.join(''),
         question: outcome.question,
       });
       return;
@@ -751,7 +769,7 @@ async function runLeaderOnlyDelivery({
       create_time: Date.now(),
     };
     deps.store.insertTeamMessageRecord(finalMessage);
-    deps.store.updateTeamDeliveryStatus(delivery_id, 'done');
+    deps.store.finishTeamDeliveryAttempt({ delivery_id, attempt_id: attempt.attempt_id, status: 'done', output: output.join(''), error: null });
     deps.store.updateTeamMemberStatus(leader.member_id, 'idle', null);
     deps.store.updateTeamStatus(team_id, 'idle');
     const completedRun = deps.store.finishTeamRun(run.run_id, 'completed');
@@ -766,6 +784,7 @@ async function runLeaderOnlyDelivery({
       team_id,
       run_id: run.run_id,
       delivery_id,
+      attempt_id: attempt.attempt_id,
       member_id: leader.member_id,
       status: 'done',
     });
@@ -784,7 +803,7 @@ async function runLeaderOnlyDelivery({
     };
 
     deps.store.insertTeamMessageRecord(errorMessage);
-    deps.store.updateTeamDeliveryStatus(delivery_id, 'failed', message);
+    deps.store.finishTeamDeliveryAttempt({ delivery_id, attempt_id: attempt.attempt_id, status: 'failed', output: output.join(''), error: message });
     deps.store.updateTeamMemberStatus(leader.member_id, 'error', null);
     deps.store.updateTeamStatus(team_id, 'error');
     deps.store.recordError(session.session_id, message);
@@ -796,6 +815,7 @@ async function runLeaderOnlyDelivery({
       team_id,
       run_id: run.run_id,
       delivery_id,
+      attempt_id: attempt.attempt_id,
       member_id: leader.member_id,
       status: 'failed',
     });
@@ -830,8 +850,7 @@ async function runTeamOrchestrator({
       });
     }
 
-    let claimed = deps.store.claimNextRunnableTeamDelivery(run_id, { includeLeader: false });
-    if (!claimed) claimed = deps.store.claimNextRunnableTeamDelivery(run_id);
+    const claimed = claimNextDeliveryForCurrentWave(deps, run_id);
     if (!claimed) break;
 
     deps.sse.broadcast({
@@ -839,6 +858,7 @@ async function runTeamOrchestrator({
       team_id,
       run_id,
       delivery_id: claimed.delivery.delivery_id,
+      attempt_id: claimed.attempt.attempt_id,
       member_id: claimed.member.member_id,
       status: 'running',
     });
@@ -848,6 +868,7 @@ async function runTeamOrchestrator({
         deps,
         permissions,
         delivery: claimed.delivery,
+        attempt: claimed.attempt,
         message: claimed.message,
         leader: claimed.member,
       });
@@ -856,6 +877,7 @@ async function runTeamOrchestrator({
         deps,
         permissions,
         delivery: claimed.delivery,
+        attempt: claimed.attempt,
         message: claimed.message,
         member: claimed.member,
       });
@@ -865,6 +887,18 @@ async function runTeamOrchestrator({
   deps.store.completeRunIfNoOpenDeliveries(run_id);
 }
 
+function claimNextDeliveryForCurrentWave(deps: AppDeps, run_id: string) {
+  const nonLeader = deps.store.claimNextRunnableTeamDelivery(run_id, { includeLeader: false });
+  if (nonLeader) return nonLeader;
+
+  // Keep leader follow-up behind the current worker/reviewer wave. Pending
+  // retry-delayed deliveries can still produce output, so let their scheduled
+  // orchestrator wake-up run before the leader consumes the inbox.
+  if (deps.store.hasActiveNonLeaderTeamDeliveries(run_id)) return undefined;
+
+  return deps.store.claimNextRunnableTeamDelivery(run_id);
+}
+
 function markLeaderWaitingForUser({
   deps,
   team_id,
@@ -872,6 +906,8 @@ function markLeaderWaitingForUser({
   leader,
   session,
   delivery_id,
+  attempt_id,
+  attempt_output,
   question,
 }: {
   deps: AppDeps;
@@ -880,8 +916,13 @@ function markLeaderWaitingForUser({
   leader: TeamMemberRecord;
   session: SessionRecord;
   delivery_id: string;
+  attempt_id?: string | null;
+  attempt_output?: string | null;
   question: string;
 }): void {
+  if (attempt_id) {
+    deps.store.finishTeamDeliveryAttempt({ delivery_id, attempt_id, status: 'done', output: attempt_output ?? null, error: null });
+  }
   const waiting = deps.store.waitTeamRunForUser({
     team_id,
     run_id,
@@ -902,6 +943,7 @@ function markLeaderWaitingForUser({
     team_id,
     run_id,
     delivery_id,
+    attempt_id,
     member_id: leader.member_id,
     status: 'done',
   });
@@ -914,16 +956,71 @@ function markLeaderWaitingForUser({
   });
 }
 
+function finishLeaderInboxBatch({
+  deps,
+  leader,
+  primary_delivery_id,
+  batch,
+}: {
+  deps: AppDeps;
+  leader: TeamMemberRecord;
+  primary_delivery_id: string;
+  batch: Array<{ delivery: TeamMessageDeliveryRecord; message: TeamMessageRecord }>;
+}): TeamMessageDeliveryRecord[] {
+  const additional = batch
+    .map((item) => item.delivery.delivery_id)
+    .filter((delivery_id) => delivery_id !== primary_delivery_id);
+  const finished = deps.store.markPendingTeamDeliveriesDone(additional);
+  if (batch.length > 1) {
+    deps.store.insertTeamMessageRecord({
+      message_id: randomUUID(),
+      team_id: batch[0].delivery.team_id,
+      run_id: batch[0].delivery.run_id,
+      from_member_id: leader.member_id,
+      from_kind: 'system',
+      kind: 'status',
+      content: `Leader processed inbox batch: ${batch.map((item) => item.delivery.delivery_id).join(', ')}`,
+      create_time: Date.now(),
+    });
+  }
+  return finished;
+}
+
+function broadcastBatchedLeaderDeliveryDone({
+  deps,
+  batch,
+  primary_delivery_id,
+}: {
+  deps: AppDeps;
+  batch: TeamMessageDeliveryRecord[];
+  primary_delivery_id: string;
+}): void {
+  for (const delivery of batch) {
+    if (delivery.delivery_id === primary_delivery_id) continue;
+    deps.sse.broadcast({
+      type: 'team_delivery_status_change',
+      team_id: delivery.team_id,
+      run_id: delivery.run_id,
+      delivery_id: delivery.delivery_id,
+      attempt_id: null,
+      member_id: delivery.to_member_id,
+      status: 'done',
+    });
+  }
+}
+
 async function runClaimedLeaderFollowUpDelivery({
   deps,
   permissions,
   delivery,
+  attempt,
   message,
   leader,
 }: {
   deps: AppDeps;
   permissions: PermissionBroker;
   delivery: TeamMessageDeliveryRecord;
+  attempt: TeamDeliveryAttemptRecord;
   message: TeamMessageRecord;
   leader: TeamMemberRecord;
 }): Promise<void> {
@@ -942,7 +1039,7 @@ async function runClaimedLeaderFollowUpDelivery({
     };
 
     deps.store.insertTeamMessageRecord(errorMessage);
-    deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'failed', error);
+    deps.store.finishTeamDeliveryAttempt({ delivery_id: delivery.delivery_id, attempt_id: attempt.attempt_id, status: 'failed', output: null, error });
     deps.store.updateTeamMemberStatus(leader.member_id, 'error', null);
     deps.store.updateTeamStatus(delivery.team_id, 'error');
     if (session) deps.store.recordError(session.session_id, error);
@@ -955,6 +1052,7 @@ async function runClaimedLeaderFollowUpDelivery({
       team_id: delivery.team_id,
       run_id: delivery.run_id,
       delivery_id: delivery.delivery_id,
+      attempt_id: attempt.attempt_id,
       member_id: leader.member_id,
       status: 'failed',
     });
@@ -992,12 +1090,14 @@ async function runClaimedLeaderFollowUpDelivery({
 
   const output: string[] = [];
   const team = deps.store.getTeam(delivery.team_id);
-  const broadcastLeaderText = (text: string, stream_kind: 'text' | 'thinking' | 'tool' | 'status' = 'text', stream_label?: string) =>
-    deps.sse.broadcast({
-      type: 'team_text_delta',
+  let leaderBatch: Array<{ delivery: TeamMessageDeliveryRecord; message: TeamMessageRecord }> = [{ delivery, message }];
+  const broadcastLeaderText = (text: string, stream_kind: TeamStreamKind = 'text', stream_label?: string) =>
+    broadcastTeamTextDelta({
+      deps,
       team_id: delivery.team_id,
       run_id: delivery.run_id,
       delivery_id: delivery.delivery_id,
+      attempt_id: attempt.attempt_id,
       member_id: leader.member_id,
       text,
       stream_kind,
@@ -1006,6 +1106,8 @@ async function runClaimedLeaderFollowUpDelivery({
 
   deps.store.updateStatus(session.session_id, 'running');
   deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
+  const includeInitialization = leader.initialized_at === null;
+  const activeLeader = includeInitialization ? deps.store.markTeamMemberInitialized(leader.member_id) ?? leader : leader;
 
   const handlers: PromptHandlers = {
     onTextDelta: (delta) => {
@@ -1049,13 +1151,19 @@ async function runClaimedLeaderFollowUpDelivery({
 
   try {
     const runItems = deps.store.getTeamRun(delivery.run_id);
+    leaderBatch = deps.store.listLeaderInboxBatch({
+      run_id: delivery.run_id,
+      leader_member_id: leader.member_id,
+      primary_delivery_id: delivery.delivery_id,
+    });
     await adapter.prompt(
       session.real_session_id,
       session.cwd,
       leaderFollowUpPrompt({
         team_name: team?.name ?? delivery.team_id,
-        leader,
-        message,
+        leader: activeLeader,
+        includeInitialization,
+        inboxBatch: leaderBatch,
         members: team?.members ?? [leader],
         runItems,
       }),
@@ -1106,7 +1214,8 @@ async function runClaimedLeaderFollowUpDelivery({
         now: Date.now(),
       });
 
-      deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'done');
+      deps.store.finishTeamDeliveryAttempt({ delivery_id: delivery.delivery_id, attempt_id: attempt.attempt_id, status: 'done', output: output.join(''), error: null });
+      const batchedDone = finishLeaderInboxBatch({ deps, leader, primary_delivery_id: delivery.delivery_id, batch: leaderBatch });
       deps.store.updateTeamMemberStatus(leader.member_id, 'idle', null);
       const current = deps.store.get(session.session_id);
       if (current && current.status === 'running') {
@@ -1118,9 +1227,11 @@ async function runClaimedLeaderFollowUpDelivery({
         team_id: delivery.team_id,
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
+        attempt_id: attempt.attempt_id,
         member_id: leader.member_id,
         status: 'done',
       });
+      broadcastBatchedLeaderDeliveryDone({ deps, batch: batchedDone, primary_delivery_id: delivery.delivery_id });
       deps.sse.broadcast({
         type: 'team_plan_created',
         team_id: delivery.team_id,
@@ -1134,6 +1245,7 @@ async function runClaimedLeaderFollowUpDelivery({
     }
 
     if (outcome.type === 'need_user_input') {
+      const batchedDone = finishLeaderInboxBatch({ deps, leader, primary_delivery_id: delivery.delivery_id, batch: leaderBatch });
       markLeaderWaitingForUser({
         deps,
         team_id: delivery.team_id,
@@ -1141,8 +1253,11 @@ async function runClaimedLeaderFollowUpDelivery({
         leader,
         session,
         delivery_id: delivery.delivery_id,
+        attempt_id: attempt.attempt_id,
+        attempt_output: output.join(''),
         question: outcome.question,
       });
+      broadcastBatchedLeaderDeliveryDone({ deps, batch: batchedDone, primary_delivery_id: delivery.delivery_id });
       return;
     }
 
@@ -1157,7 +1272,8 @@ async function runClaimedLeaderFollowUpDelivery({
       create_time: Date.now(),
     };
     deps.store.insertTeamMessageRecord(finalMessage);
-    deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'done');
+    deps.store.finishTeamDeliveryAttempt({ delivery_id: delivery.delivery_id, attempt_id: attempt.attempt_id, status: 'done', output: output.join(''), error: null });
+    const batchedDone = finishLeaderInboxBatch({ deps, leader, primary_delivery_id: delivery.delivery_id, batch: leaderBatch });
     deps.store.updateTeamMemberStatus(leader.member_id, 'idle', null);
     deps.store.updateTeamStatus(delivery.team_id, 'idle');
     const cancelled = deps.store.cancelOpenTeamDeliveries(delivery.run_id, delivery.delivery_id);
@@ -1173,9 +1289,11 @@ async function runClaimedLeaderFollowUpDelivery({
       team_id: delivery.team_id,
       run_id: delivery.run_id,
       delivery_id: delivery.delivery_id,
+      attempt_id: attempt.attempt_id,
       member_id: leader.member_id,
       status: 'done',
     });
+    broadcastBatchedLeaderDeliveryDone({ deps, batch: batchedDone, primary_delivery_id: delivery.delivery_id });
     for (const cancelledDelivery of cancelled) {
       deps.sse.broadcast({
         type: 'team_delivery_status_change',
@@ -1196,12 +1314,14 @@ async function runClaimedTeamDelivery({
   deps,
   permissions,
   delivery,
+  attempt,
   message,
   member,
 }: {
   deps: AppDeps;
   permissions: PermissionBroker;
   delivery: TeamMessageDeliveryRecord;
+  attempt: TeamDeliveryAttemptRecord;
   message: TeamMessageRecord;
   member: TeamMemberRecord;
 }): Promise<void> {
@@ -1210,18 +1330,49 @@ async function runClaimedTeamDelivery({
   const output: string[] = [];
   const team = deps.store.getTeam(delivery.team_id);
   const fail = (error: string) => {
-    deps.store.updateTeamDeliveryStatus(delivery.delivery_id, 'failed', error);
-    deps.store.updateTeamMemberStatus(member.member_id, 'error', null);
-    if (session) deps.store.recordError(session.session_id, error);
-    if (session) deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'error' });
+    const retry = retryableDeliveryFailure(deps, delivery, attempt, error);
+    const finished = deps.store.finishTeamDeliveryAttempt({
+      delivery_id: delivery.delivery_id,
+      attempt_id: attempt.attempt_id,
+      status: 'failed',
+      output: retry.shouldRetry ? null : output.join(''),
+      error,
+      retry_after: retry.retry_after,
+    });
+    deps.store.updateTeamMemberStatus(member.member_id, 'idle', null);
+    if (session && !retry.shouldRetry) deps.store.recordError(session.session_id, error);
+    if (session) {
+      deps.store.updateStatus(session.session_id, retry.shouldRetry ? 'completed' : 'error');
+      deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: retry.shouldRetry ? 'completed' : 'error' });
+    }
     deps.sse.broadcast({
       type: 'team_delivery_status_change',
       team_id: delivery.team_id,
       run_id: delivery.run_id,
       delivery_id: delivery.delivery_id,
+      attempt_id: attempt.attempt_id,
       member_id: member.member_id,
-      status: 'failed',
+      status: retry.shouldRetry ? 'pending' : 'failed',
     });
+    if (retry.shouldRetry) {
+      scheduleTeamRetryOrchestrator(deps, permissions, delivery.team_id, delivery.run_id, retry.delay_ms);
+      return;
+    }
+
+    const routed = routeMemberOutboundToLeader({
+      deps,
+      delivery: finished?.delivery ?? delivery,
+      member,
+      outbound: { kind: 'error', content: error },
+    });
+    if (routed) {
+      deps.sse.broadcast({
+        type: 'team_message_created',
+        team_id: delivery.team_id,
+        message: routed.message,
+        delivery: routed.delivery,
+      });
+    }
   };
 
   if (!session) {
@@ -1235,26 +1386,30 @@ async function runClaimedTeamDelivery({
 
   deps.store.updateStatus(session.session_id, 'running');
   deps.sse.broadcast({ type: 'status_change', session_id: session.session_id, status: 'running' });
+  const includeInitialization = member.initialized_at === null;
+  const activeMember = includeInitialization ? deps.store.markTeamMemberInitialized(member.member_id) ?? member : member;
 
   const handlers: PromptHandlers = {
     onTextDelta: (delta) => {
       output.push(delta);
-      deps.sse.broadcast({
-        type: 'team_text_delta',
+      broadcastTeamTextDelta({
+        deps,
         team_id: delivery.team_id,
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
+        attempt_id: attempt.attempt_id,
         member_id: member.member_id,
         text: delta,
         stream_kind: 'text',
       });
     },
     onToolCallStart: (tool_call_id, name, input) => {
-      deps.sse.broadcast({
-        type: 'team_text_delta',
+      broadcastTeamTextDelta({
+        deps,
         team_id: delivery.team_id,
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
+        attempt_id: attempt.attempt_id,
         member_id: member.member_id,
         text: `${name} ${tool_call_id} ${formatTeamToolInput(input)}`,
         stream_kind: 'tool',
@@ -1262,11 +1417,12 @@ async function runClaimedTeamDelivery({
       });
     },
     onToolCallEnd: (tool_call_id) => {
-      deps.sse.broadcast({
-        type: 'team_text_delta',
+      broadcastTeamTextDelta({
+        deps,
         team_id: delivery.team_id,
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
+        attempt_id: attempt.attempt_id,
         member_id: member.member_id,
         text: tool_call_id,
         stream_kind: 'tool',
@@ -1274,11 +1430,12 @@ async function runClaimedTeamDelivery({
       });
     },
     onThinkingDelta: (delta) => {
-      deps.sse.broadcast({
-        type: 'team_text_delta',
+      broadcastTeamTextDelta({
+        deps,
         team_id: delivery.team_id,
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
+        attempt_id: attempt.attempt_id,
         member_id: member.member_id,
         text: delta,
         stream_kind: 'thinking',
@@ -1286,11 +1443,12 @@ async function runClaimedTeamDelivery({
     },
     onStatusNote: (note) => {
       output.push(note);
-      deps.sse.broadcast({
-        type: 'team_text_delta',
+      broadcastTeamTextDelta({
+        deps,
         team_id: delivery.team_id,
         run_id: delivery.run_id,
         delivery_id: delivery.delivery_id,
+        attempt_id: attempt.attempt_id,
         member_id: member.member_id,
         text: note,
         stream_kind: 'status',
@@ -1326,13 +1484,19 @@ async function runClaimedTeamDelivery({
     await adapter.prompt(
       session.real_session_id,
       session.cwd,
-      deliveryPrompt({ delivery, message, dependencies, runItems }),
+      deliveryPrompt({ delivery, message, member: activeMember, includeInitialization, dependencies, runItems }),
       handlers,
     );
 
     const outbound = parseMemberOutbound(output.join(''));
     const deliveryStatus = outbound.kind === 'error' ? 'failed' : 'done';
-    deps.store.updateTeamDeliveryStatus(delivery.delivery_id, deliveryStatus, outbound.kind === 'error' ? outbound.content : null);
+    deps.store.finishTeamDeliveryAttempt({
+      delivery_id: delivery.delivery_id,
+      attempt_id: attempt.attempt_id,
+      status: deliveryStatus,
+      output: output.join(''),
+      error: outbound.kind === 'error' ? outbound.content : null,
+    });
     deps.store.updateTeamMemberStatus(member.member_id, 'idle', null);
     const routed = routeMemberOutboundToLeader({
       deps,
@@ -1350,6 +1514,7 @@ async function runClaimedTeamDelivery({
       team_id: delivery.team_id,
       run_id: delivery.run_id,
       delivery_id: delivery.delivery_id,
+      attempt_id: attempt.attempt_id,
       member_id: member.member_id,
       status: deliveryStatus,
     });
@@ -1394,6 +1559,79 @@ function routeMemberOutboundToLeader({
   });
 }
 
+function broadcastTeamTextDelta({
+  deps,
+  team_id,
+  run_id,
+  delivery_id,
+  attempt_id,
+  member_id,
+  text,
+  stream_kind,
+  stream_label,
+}: {
+  deps: AppDeps;
+  team_id: string;
+  run_id: string;
+  delivery_id: string;
+  attempt_id: string;
+  member_id: string;
+  text: string;
+  stream_kind: TeamStreamKind;
+  stream_label?: string;
+}): void {
+  deps.sse.broadcast({
+    type: 'team_text_delta',
+    team_id,
+    run_id,
+    delivery_id,
+    attempt_id,
+    member_id,
+    text,
+    stream_kind,
+    stream_label,
+  });
+}
+
+function retryableDeliveryFailure(
+  deps: AppDeps,
+  delivery: TeamMessageDeliveryRecord,
+  attempt: TeamDeliveryAttemptRecord,
+  error: string,
+): { shouldRetry: true; retry_after: number; delay_ms: number } | { shouldRetry: false; retry_after: null; delay_ms: 0 } {
+  if (!isRetryableDeliveryError(error)) return { shouldRetry: false, retry_after: null, delay_ms: 0 };
+  if (attempt.attempt_number >= delivery.max_attempts) return { shouldRetry: false, retry_after: null, delay_ms: 0 };
+  const backoff = deps.deliveryRetryBackoffMs ?? DEFAULT_DELIVERY_RETRY_BACKOFF_MS;
+  const delay_ms = backoff[Math.max(0, attempt.attempt_number - 1)] ?? backoff[backoff.length - 1] ?? 0;
+  return { shouldRetry: true, retry_after: Date.now() + delay_ms, delay_ms };
+}
+
+function isRetryableDeliveryError(error: string): boolean {
+  const text = error.toLowerCase();
+  if (
+    /\b(billing|payment|required payment|quota exhausted|insufficient quota|api key|unauthorized|forbidden|permission denied|invalid|bad request|not found|missing file|missing path)\b/.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  return /\b(timeout|timed out|etimedout|econnreset|network|rate limit|rate-limited|429|5\d\d|unavailable|temporar(?:y|ily)|transient)\b/.test(
+    text,
+  );
+}
+
+function scheduleTeamRetryOrchestrator(
+  deps: AppDeps,
+  permissions: PermissionBroker,
+  team_id: string,
+  run_id: string,
+  delay_ms: number,
+): void {
+  setTimeout(() => {
+    void runTeamOrchestrator({ deps, permissions, team_id, run_id });
+  }, Math.max(0, delay_ms));
+}
+
 function validateCreateTeam(
   body: Partial<CreateTeamInput> | null,
 ): { value: CreateTeamInput } | { error: string } {
@@ -1429,7 +1667,7 @@ function validateCreateTeam(
   return { value: { name: body.name.trim(), cwd: body.cwd.trim(), members } };
 }
 
-function memberInitializationPrompt(member: TeamMemberInput): string {
+function memberInitializationPrompt(member: Pick<TeamMemberInput, 'role' | 'responsibility_prompt'>): string {
   return [
     `You are ${member.role} in an agent team.`,
     '',
@@ -1490,11 +1728,13 @@ function teamPermissionContext({
 function leaderOnlyPrompt({
   team_name,
   leader,
+  includeInitialization,
   text,
   members,
 }: {
   team_name: string;
   leader: TeamMemberRecord;
+  includeInitialization: boolean;
   text: string;
   members: TeamWithMembers['members'];
 }): string {
@@ -1505,6 +1745,9 @@ function leaderOnlyPrompt({
   });
 
   return [
+    includeInitialization ? 'Member initialization (first delivery only):' : '',
+    includeInitialization ? memberInitializationPrompt(leader) : '',
+    includeInitialization ? '' : '',
     `Team: ${team_name}`,
     `Delivery target: ${leader.role}`,
     '',
@@ -1541,13 +1784,15 @@ function leaderOnlyPrompt({
 function leaderFollowUpPrompt({
   team_name,
   leader,
-  message,
+  includeInitialization,
+  inboxBatch,
   members,
   runItems,
 }: {
   team_name: string;
   leader: TeamMemberRecord;
-  message: TeamMessageRecord;
+  includeInitialization: boolean;
+  inboxBatch: Array<{ delivery: TeamMessageDeliveryRecord; message: TeamMessageRecord }>;
   members: TeamWithMembers['members'];
   runItems: TeamRunWithItems | undefined;
 }): string {
@@ -1557,27 +1802,31 @@ function leaderFollowUpPrompt({
     return `- ${member.role}: agent=${member.coding_agent}, ${model}, responsibility=${member.responsibility_prompt}`;
   });
   const memberById = new Map(members.map((member) => [member.member_id, member]));
-  const sender = message.from_member_id ? memberById.get(message.from_member_id)?.role ?? message.from_member_id : message.from_kind;
+  const batchMessageIds = new Set(inboxBatch.map((item) => item.message.message_id));
   const busLines = (runItems?.messages ?? [])
-    .filter((item) => item.message_id !== message.message_id)
+    .filter((item) => !batchMessageIds.has(item.message_id))
     .map((item) => {
       const from = item.from_member_id ? memberById.get(item.from_member_id)?.role ?? item.from_member_id : item.from_kind;
       return `- ${item.kind} from ${from}: ${compactForPrompt(item.content)}`;
     });
+  const batchLines = leaderInboxBatchForPrompt(inboxBatch, memberById);
 
   return [
+    includeInitialization ? 'Member initialization (first delivery only):' : '',
+    includeInitialization ? memberInitializationPrompt(leader) : '',
+    includeInitialization ? '' : '',
     `Team: ${team_name}`,
     `Delivery target: ${leader.role}`,
     '',
     'Leader responsibility:',
     leader.responsibility_prompt,
     '',
-    'New inbound team message:',
-    `Kind: ${message.kind}`,
-    `From: ${sender}`,
-    message.content,
+    'New inbound team message: current leader inbox batch follows',
+    'Current leader inbox batch:',
+    batchLines.length > 0 ? batchLines.join('\n') : '- none',
     '',
-    'Run message bus summary:',
+    'Run message bus summary (orchestrator-generated excerpts; not full message bodies):',
+    'If an item is marked as an orchestrator excerpt, do not treat that marker as evidence that the original worker output was truncated or incomplete.',
     busLines.length > 0 ? busLines.join('\n') : '- none',
     '',
     'Decide whether to finish now, ask the user for clarification, or create another plan for existing team members.',
@@ -1600,6 +1849,36 @@ function leaderFollowUpPrompt({
     'Plan shape:',
     '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
   ].join('\n');
+}
+
+const LEADER_INBOX_BATCH_CHAR_BUDGET = 12_000;
+
+function leaderInboxBatchForPrompt(
+  inboxBatch: Array<{ delivery: TeamMessageDeliveryRecord; message: TeamMessageRecord }>,
+  memberById: Map<string, TeamMemberRecord>,
+): string[] {
+  const fullLength = inboxBatch.reduce((sum, item) => sum + item.message.content.length, 0);
+  const useFullContent = fullLength <= LEADER_INBOX_BATCH_CHAR_BUDGET;
+  const perItemBudget = Math.max(400, Math.floor(LEADER_INBOX_BATCH_CHAR_BUDGET / Math.max(1, inboxBatch.length)));
+
+  return inboxBatch.map((item) => {
+    const from = item.message.from_member_id ? memberById.get(item.message.from_member_id)?.role ?? item.message.from_member_id : item.message.from_kind;
+    const content = useFullContent ? item.message.content : compactForPromptWithBudget(item.message.content, perItemBudget);
+    return [
+      `- Delivery ${item.delivery.delivery_id}`,
+      `  Kind: ${item.message.kind}`,
+      `  From: ${from}`,
+      `  Content (${useFullContent ? 'full' : 'orchestrator excerpt'}):`,
+      indentForPrompt(content, '  '),
+    ].join('\n');
+  });
+}
+
+function indentForPrompt(value: string, prefix: string): string {
+  return value
+    .split('\n')
+    .map((line) => `${prefix}${line}`)
+    .join('\n');
 }
 
 function leaderJsonRetryPrompt(previous: string, error: string): string {
@@ -1910,11 +2189,15 @@ function assignmentContent(assignment: ValidatedPlanAssignment): string {
 function deliveryPrompt({
   delivery,
   message,
+  member,
+  includeInitialization,
   dependencies,
   runItems,
 }: {
   delivery: TeamMessageDeliveryRecord;
   message: TeamMessageRecord;
+  member: TeamMemberRecord;
+  includeInitialization: boolean;
   dependencies: Array<{ depends_on_delivery_id: string; dependency_type: TeamDeliveryDependencyType }>;
   runItems: TeamRunWithItems | undefined;
 }): string {
@@ -1933,6 +2216,9 @@ function deliveryPrompt({
   });
 
   return [
+    includeInitialization ? 'Member initialization (first delivery only):' : '',
+    includeInitialization ? memberInitializationPrompt(member) : '',
+    includeInitialization ? '' : '',
     `New delivery: ${delivery.delivery_id}`,
     `Run: ${delivery.run_id}`,
     '',
@@ -1950,21 +2236,11 @@ function deliveryPrompt({
 }
 
 function compactForPrompt(value: string): string {
-  const normalized = value.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= 240) return normalized;
-  return `${normalized.slice(0, 237)}...`;
+  return compactForPromptWithBudget(value, 240);
 }
 
-function initializationHandlers(role: string): PromptHandlers {
-  return {
-    onTextDelta: () => {},
-    onToolCallStart: () => {},
-    onToolCallEnd: () => {},
-    onThinkingDelta: () => {},
-    onStatusNote: () => {},
-    onStatusChange: () => {},
-    onPermissionRequest: async (_request_id, tool_name) => {
-      throw new Error(`team member initialization for ${role} requested permission for ${tool_name}`);
-    },
-  };
+function compactForPromptWithBudget(value: string, budget: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= budget) return normalized;
+  return `[orchestrator excerpt shortened for prompt budget; original message may be complete] ${normalized.slice(0, Math.max(0, budget - 3))}`;
 }

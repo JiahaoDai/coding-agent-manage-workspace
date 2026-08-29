@@ -15,6 +15,7 @@ export type TeamMessageKind =
   | 'error';
 export type TeamMessageFromKind = 'user' | 'member' | 'system';
 export type TeamDeliveryStatus = 'blocked' | 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+export type TeamDeliveryAttemptStatus = 'running' | 'done' | 'failed' | 'cancelled';
 export type TeamDeliveryDependencyType = 'success' | 'finished';
 
 export interface TeamRecord {
@@ -37,6 +38,7 @@ export interface TeamMemberRecord {
   responsibility_prompt: string;
   status: TeamMemberStatus;
   current_delivery_id: string | null;
+  initialized_at: number | null;
   session_missing?: boolean;
   create_time: number;
   modify_time: number;
@@ -80,6 +82,19 @@ export interface TeamMessageDeliveryRecord {
   started_at: number | null;
   finished_at: number | null;
   error: string | null;
+  max_attempts: number;
+  retry_after: number | null;
+}
+
+export interface TeamDeliveryAttemptRecord {
+  attempt_id: string;
+  delivery_id: string;
+  attempt_number: number;
+  status: TeamDeliveryAttemptStatus;
+  started_at: number;
+  finished_at: number | null;
+  output: string | null;
+  error: string | null;
 }
 
 export interface TeamDeliveryDependencyRecord {
@@ -92,6 +107,7 @@ export interface TeamRunWithItems {
   run: TeamRunRecord;
   messages: TeamMessageRecord[];
   deliveries: TeamMessageDeliveryRecord[];
+  attempts: TeamDeliveryAttemptRecord[];
   dependencies: TeamDeliveryDependencyRecord[];
 }
 

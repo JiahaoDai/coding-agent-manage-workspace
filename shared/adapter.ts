@@ -88,6 +88,9 @@ export interface AgentAdapter {
     cwd: string,
     command: string,
   ): Promise<CapabilityResult<ShellCommandResult>>;
+
+  /** Release any adapter-owned background processes or connections. */
+  close?(): void | Promise<void>;
 }
 
 /** Callbacks an adapter drives while streaming a prompt. */

@@ -105,14 +105,14 @@ class ScriptedAdapter extends BaseAdapter {
 
 }
 
-async function startServer(opts?: { dbPath?: string; fs?: FsTree }) {
+async function startServer(opts?: { dbPath?: string; fs?: FsTree; deliveryRetryBackoffMs?: number[] }) {
   const db = new Database(opts?.dbPath ?? ':memory:');
   const store = new SessionStore(db);
   const adapters = new AdapterRegistry();
   const fake = new ScriptedAdapter();
   adapters.register('fake', fake);
   const sse = new SseHub();
-  const app = createApp({ store, adapters, sse, fs: opts?.fs });
+  const app = createApp({ store, adapters, sse, fs: opts?.fs, deliveryRetryBackoffMs: opts?.deliveryRetryBackoffMs });
 
   let server!: ServerType;
   await new Promise<void>((resolve) => {
@@ -284,10 +284,6 @@ describe('walking skeleton', () => {
       const first = await startServer({ dbPath });
       try {
         first.fake.promptScript = (handlers, ctx) => {
-          if (ctx.input.includes('You are ')) {
-            handlers.onStatusChange('completed');
-            return;
-          }
           if (ctx.input.includes('User request:')) {
             handlers.onTextDelta(JSON.stringify({
               type: 'plan',
@@ -376,6 +372,7 @@ describe('walking skeleton', () => {
           run: { status: string };
           messages: Array<{ kind: string; content: string }>;
           deliveries: Array<{ status: string; to_member_id: string }>;
+          attempts: Array<{ attempt_id: string; delivery_id: string; status: string; output: string | null }>;
           dependencies: unknown[];
         }>;
         expect(runs).toHaveLength(1);
@@ -389,6 +386,7 @@ describe('walking skeleton', () => {
         ]);
         expect(runs[0].messages.at(-1)?.content).toBe('Team history now reloads from collaboration metadata.');
         expect(runs[0].deliveries.map((delivery) => delivery.status)).toEqual(['done', 'done', 'done']);
+        expect(runs[0].attempts).toHaveLength(3);
         expect(JSON.stringify(runs[0])).not.toContain('PRIVATE_NATIVE_THINKING_TRACE');
         expect(JSON.stringify(runs[0])).not.toContain('tool-private');
       } finally {
@@ -442,10 +440,9 @@ describe('walking skeleton', () => {
 });
 
 describe('agent teams (v3 ticket #1)', () => {
-  it('creates a team with fresh member sessions and sends each initialization prompt once', async () => {
+  it('creates a team with fresh member sessions without prompting agents during creation', async () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {
-      fake.promptScript = (handlers) => handlers.onStatusChange('completed');
       const res = await post(baseUrl, '/api/teams', {
         name: 'Product Builder',
         cwd: '/tmp/team-project',
@@ -478,11 +475,7 @@ describe('agent teams (v3 ticket #1)', () => {
 
       const sessions = (await (await fetch(`${baseUrl}/api/sessions`)).json()) as SessionRecord[];
       expect(sessions.filter((session) => session.cwd === '/tmp/team-project')).toHaveLength(0);
-      expect(fake.promptCalls).toHaveLength(2);
-      expect(fake.promptCalls[0].input).toContain('You are leader in an agent team.');
-      expect(fake.promptCalls[0].input).toContain('Lead the team and produce final answers.');
-      expect(fake.promptCalls[1].input).toContain('You are docs-writer in an agent team.');
-      expect(fake.promptCalls[1].input).toContain('Write user-facing docs for completed team work.');
+      expect(fake.promptCalls).toHaveLength(0);
       expect(fake.modelSetCalls).toEqual([{ real_session_id: 'native-/tmp/team-project-2', model_id: 'fake/fast' }]);
 
       const listed = await (await fetch(`${baseUrl}/api/teams`)).json() as Array<{ team_id: string; members: unknown[] }>;
@@ -499,7 +492,7 @@ describe('agent teams (v3 ticket #1)', () => {
     }
   });
 
-  it('fails team creation when initialization asks for tool permission', async () => {
+  it('defers initialization prompts until the member receives a delivery', async () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {
       fake.promptScript = async (handlers) => {
@@ -507,7 +500,7 @@ describe('agent teams (v3 ticket #1)', () => {
       };
 
       const res = await post(baseUrl, '/api/teams', {
-        name: 'Unsafe Init',
+        name: 'Deferred Init',
         cwd: '/tmp/team-project',
         members: [
           {
@@ -519,11 +512,9 @@ describe('agent teams (v3 ticket #1)', () => {
         ],
       });
 
-      expect(res.status).toBe(422);
-      expect(await res.json()).toEqual({
-        error: 'team member initialization for leader requested permission for Bash',
-      });
-      expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toEqual([]);
+      expect(res.status).toBe(201);
+      expect(fake.promptCalls).toHaveLength(0);
+      expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toHaveLength(1);
     } finally {
       server.close();
       db.close();
@@ -635,7 +626,7 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
         team_id: string;
         members: Array<{ member_id: string; session_id: string }>;
       };
-      expect(fake.promptCalls).toHaveLength(1);
+      expect(fake.promptCalls).toHaveLength(0);
 
       const sseRes = await fetch(`${baseUrl}/api/events`);
       const reader = sseRes.body!.getReader();
@@ -678,15 +669,16 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
       expect(completed!.final_message.content).toBe('Leader handled the request.');
       expect(completed!.run.status).toBe('completed');
 
-      expect(fake.promptCalls).toHaveLength(2);
-      expect(fake.promptCalls[1]).toMatchObject({
+      expect(fake.promptCalls).toHaveLength(1);
+      expect(fake.promptCalls[0]).toMatchObject({
         real_session_id: 'native-/tmp/team-project',
         cwd: '/tmp/team-project',
       });
-      expect(fake.promptCalls[1].input).toContain('User request:');
-      expect(fake.promptCalls[1].input).toContain('Build the settings page.');
-      expect(fake.promptCalls[1].input).not.toContain('Collaboration rules:');
-      expect(fake.promptCalls[1].input).not.toContain('You are leader in an agent team.');
+      expect(fake.promptCalls[0].input).toContain('User request:');
+      expect(fake.promptCalls[0].input).toContain('Build the settings page.');
+      expect(fake.promptCalls[0].input).toContain('Member initialization (first delivery only):');
+      expect(fake.promptCalls[0].input).toContain('You are leader in an agent team.');
+      expect(fake.promptCalls[0].input).toContain('Lead the team and produce final answers.');
 
       const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
         run: { status: string };
@@ -720,10 +712,6 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {
       fake.promptScript = async (handlers, ctx) => {
-        if (ctx.input.includes('You are ')) {
-          handlers.onStatusChange('completed');
-          return;
-        }
         if (ctx.input.includes('User request:')) {
           handlers.onTextDelta(JSON.stringify({
             type: 'plan',
@@ -879,10 +867,6 @@ describe('agent team leader-only run (v3 ticket #3)', () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {
       fake.promptScript = (handlers, ctx) => {
-        if (ctx.input.includes('You are ')) {
-          handlers.onStatusChange('completed');
-          return;
-        }
         if (ctx.input.includes('User request:')) {
           handlers.onTextDelta(JSON.stringify({
             type: 'need_user_input',
@@ -1252,10 +1236,15 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
       expect(workerPrompts[2]).toContain('Task: Review the API implementation.');
       expect(workerPrompts[2]).toContain('Dependency summaries:');
       expect(workerPrompts[2]).toContain('requires success, status=done');
+      expect(workerPrompts[0]).toContain('Member initialization (first delivery only):');
+      expect(workerPrompts[0]).toContain('You are backend-coder in an agent team.');
+      expect(workerPrompts[0]).toContain('Implement backend tasks.');
+      expect(workerPrompts[1]).not.toContain('Member initialization (first delivery only):');
+      expect(workerPrompts[1]).not.toContain('You are backend-coder in an agent team.');
+      expect(workerPrompts[2]).toContain('Member initialization (first delivery only):');
+      expect(workerPrompts[2]).toContain('You are reviewer in an agent team.');
+      expect(workerPrompts[2]).toContain('Review completed work.');
       for (const prompt of workerPrompts) {
-        expect(prompt).not.toContain('You are backend-coder in an agent team.');
-        expect(prompt).not.toContain('You are reviewer in an agent team.');
-        expect(prompt).not.toContain('Collaboration rules:');
         expect(prompt).not.toContain('Leader responsibility:');
       }
 
@@ -1270,12 +1259,294 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         'done',
         'done',
         'done',
-        'cancelled',
-        'cancelled',
+        'done',
+        'done',
       ]);
 
       const backend = team.members.find((member) => member.role === 'backend-coder')!;
       expect(runs[0].deliveries.filter((delivery) => delivery.to_member_id === backend.member_id).map((delivery) => delivery.enqueue_seq)).toEqual([1, 2]);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('processes complete worker results as one leader inbox batch without stale cancellation', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const backendResult = `RESULT: Backend result is complete. ${'backend detail '.repeat(80)}BACKEND_COMPLETE_END`;
+      const reviewerResult = `RESULT: Reviewer result is complete. ${'reviewer detail '.repeat(80)}REVIEWER_COMPLETE_END`;
+      const leaderFollowUpPrompts: string[] = [];
+
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Collect two complete worker results.',
+            assignments: [
+              {
+                id: 'backend-result',
+                to: 'backend-coder',
+                task: 'Produce a long complete backend result.',
+                context: 'Return a complete result.',
+                depends_on: [],
+              },
+              {
+                id: 'reviewer-result',
+                to: 'reviewer',
+                task: 'Produce a long complete reviewer result.',
+                context: 'Return a complete result.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          handlers.onTextDelta(ctx.input.includes('backend result') ? backendResult : reviewerResult);
+        } else if (ctx.input.includes('New inbound team message:')) {
+          leaderFollowUpPrompts.push(ctx.input);
+          const guardedExcerpt =
+            ctx.input.includes('Current leader inbox batch:') &&
+            ctx.input.includes('Run message bus summary (orchestrator-generated excerpts; not full message bodies):') &&
+            ctx.input.includes('do not treat that marker as evidence that the original worker output was truncated or incomplete');
+          if (!guardedExcerpt && ctx.input.includes('...')) {
+            handlers.onTextDelta(JSON.stringify({
+              type: 'plan',
+              summary: 'Request resend because the message bus looked truncated.',
+              assignments: [
+                {
+                  id: 'resend',
+                  to: 'reviewer',
+                  task: 'Resend your complete output.',
+                  context: 'The leader thought the prior message ended mid-stream.',
+                  depends_on: [],
+                },
+              ],
+            }));
+          } else {
+            handlers.onTextDelta(JSON.stringify({
+              type: 'final',
+              summary: 'Complete worker outputs were not mistaken for truncation.',
+              result: 'Leader handled the available complete worker output without requesting a resend.',
+            }));
+          }
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Collect both worker results.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+
+      expect(leaderFollowUpPrompts).not.toHaveLength(0);
+      expect(leaderFollowUpPrompts[0]).toContain('New inbound team message: current leader inbox batch follows');
+      expect(leaderFollowUpPrompts[0]).toContain('Current leader inbox batch:');
+      expect(leaderFollowUpPrompts[0]).toContain('BACKEND_COMPLETE_END');
+      expect(leaderFollowUpPrompts[0]).toContain('REVIEWER_COMPLETE_END');
+      expect(leaderFollowUpPrompts).toHaveLength(1);
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        messages: Array<{ message_id: string; kind: string; content: string }>;
+        deliveries: Array<{ message_id: string; status: string; to_member_id: string }>;
+      }>;
+      expect(runs[0].messages.some((message) => message.kind === 'assignment' && message.content.includes('Resend your complete output'))).toBe(false);
+      expect(runs[0].messages.some((message) => message.kind === 'result' && message.content.includes('REVIEWER_COMPLETE_END'))).toBe(true);
+      expect(runs[0].messages.some((message) => message.kind === 'status' && message.content.includes('Leader processed inbox batch:'))).toBe(true);
+
+      const messageById = new Map(runs[0].messages.map((message) => [message.message_id, message]));
+      const leader = team.members.find((member) => member.role === 'leader')!;
+      const leaderResultDeliveries = runs[0].deliveries.filter((delivery) => {
+        const message = messageById.get(delivery.message_id);
+        return delivery.to_member_id === leader.member_id && message?.kind === 'result';
+      });
+      expect(leaderResultDeliveries.map((delivery) => delivery.status)).toEqual(['done', 'done']);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('waits for runnable non-leader deliveries before leader follow-up', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const leaderFollowUpPrompts: string[] = [];
+
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Collect backend and reviewer wave results.',
+            assignments: [
+              {
+                id: 'backend-wave',
+                to: 'backend-coder',
+                task: 'Produce backend wave result.',
+                context: 'Return a concise backend result.',
+                depends_on: [],
+              },
+              {
+                id: 'reviewer-wave',
+                to: 'reviewer',
+                task: 'Produce reviewer wave result.',
+                context: 'Return a concise reviewer result.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          handlers.onTextDelta(
+            ctx.input.includes('backend wave result')
+              ? 'RESULT: Backend wave complete.'
+              : 'RESULT: Reviewer wave complete.',
+          );
+        } else if (ctx.input.includes('New inbound team message:')) {
+          leaderFollowUpPrompts.push(ctx.input);
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Leader saw the completed wave.',
+            result: 'Leader followed up after both non-leader deliveries finished.',
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Collect a two-worker wave.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+
+      const promptKinds = fake.promptCalls.map((call) => {
+        if (call.input.includes('User request:')) return 'leader-plan';
+        if (call.input.includes('New inbound team message:')) return 'leader-follow-up';
+        if (call.input.includes('Produce backend wave result.')) return 'backend-worker';
+        if (call.input.includes('Produce reviewer wave result.')) return 'reviewer-worker';
+        return 'unknown';
+      });
+      expect(promptKinds.slice(0, 4)).toEqual(['leader-plan', 'backend-worker', 'reviewer-worker', 'leader-follow-up']);
+      expect(leaderFollowUpPrompts).toHaveLength(1);
+      expect(leaderFollowUpPrompts[0]).toContain('Backend wave complete.');
+      expect(leaderFollowUpPrompts[0]).toContain('Reviewer wave complete.');
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('does not deadlock leader follow-up when non-leader work is retry-delayed or dependency-blocked', async () => {
+    const { db, fake, server, baseUrl } = await startServer({ deliveryRetryBackoffMs: [30] });
+    try {
+      let flakyAttempts = 0;
+      const leaderFollowUpPrompts: string[] = [];
+
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Exercise retry delay and dependency blocking.',
+            assignments: [
+              {
+                id: 'flaky-backend',
+                to: 'backend-coder',
+                task: 'Run flaky backend wave task.',
+                context: 'This may hit a transient network timeout.',
+                depends_on: [],
+              },
+              {
+                id: 'blocked-review',
+                to: 'reviewer',
+                task: 'Review backend only after success.',
+                context: 'This should stay blocked while backend is retry-delayed.',
+                depends_on: ['flaky-backend'],
+                dependency_type: 'success',
+              },
+              {
+                id: 'independent-review',
+                to: 'reviewer',
+                task: 'Produce independent reviewer wave result.',
+                context: 'This can run without the backend result.',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New inbound team message:')) {
+          leaderFollowUpPrompts.push(ctx.input);
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Leader handled the completed worker wave.',
+            result: 'Leader completed after retry-delayed and dependency-blocked work finished.',
+          }));
+        } else if (ctx.input.includes('Review backend only after success.')) {
+          handlers.onTextDelta('REVIEW: Blocked review ran after backend retry success.');
+        } else if (ctx.input.includes('Run flaky backend wave task.')) {
+          flakyAttempts += 1;
+          if (flakyAttempts === 1) throw new Error('network timeout while running backend worker');
+          handlers.onTextDelta('RESULT: Flaky backend succeeded after retry.');
+        } else if (ctx.input.includes('Produce independent reviewer wave result.')) {
+          handlers.onTextDelta('RESULT: Independent reviewer complete.');
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Exercise delayed and blocked worker wave.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      await collectEvents(
+        reader,
+        (evs) => evs.some((event) => event.type === 'team_run_completed'),
+      );
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { status: string };
+        messages: Array<{ message_id: string; kind: string; content: string }>;
+        deliveries: Array<{ message_id: string; status: string }>;
+      }>;
+      expect(runs[0].run.status).toBe('completed');
+
+      const messageById = new Map(runs[0].messages.map((message) => [message.message_id, message]));
+      const deliveryForAssignment = (assignmentId: string) =>
+        runs[0].deliveries.find((delivery) => messageById.get(delivery.message_id)?.content.includes(`Assignment ${assignmentId}`));
+
+      expect(flakyAttempts).toBe(2);
+      expect(deliveryForAssignment('flaky-backend')?.status).toBe('done');
+      expect(deliveryForAssignment('blocked-review')?.status).toBe('done');
+      expect(deliveryForAssignment('independent-review')?.status).toBe('done');
+      expect(leaderFollowUpPrompts).toHaveLength(1);
+      expect(leaderFollowUpPrompts[0]).toContain('Flaky backend succeeded after retry.');
+      expect(leaderFollowUpPrompts[0]).toContain('Blocked review ran after backend retry success.');
+      expect(runs[0].messages.some((message) => message.kind === 'result' && message.content.includes('Independent reviewer complete.'))).toBe(true);
 
       await reader.cancel();
     } finally {
@@ -1689,6 +1960,116 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
         content: 'team run exceeded max_rounds (8)',
       });
       expect(runs[0].deliveries.some((delivery) => delivery.status === 'failed')).toBe(true);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it.each([
+    {
+      name: 'transient worker failure retries into a separate successful attempt',
+      terminalFailures: 1,
+      expectCompleted: true,
+    },
+    {
+      name: 'transient worker failure exhaustion reports to leader',
+      terminalFailures: 3,
+      expectCompleted: false,
+    },
+  ])('$name', async ({ terminalFailures, expectCompleted }) => {
+    const { db, fake, server, baseUrl } = await startServer({ deliveryRetryBackoffMs: [0, 0] });
+    try {
+      let backendAttempts = 0;
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Try backend work with retryable failures.',
+            assignments: [
+              {
+                id: 'backend',
+                to: 'backend-coder',
+                task: 'Implement retryable backend work.',
+                context: 'Return a concise result.',
+                depends_on: [],
+              },
+            ],
+          }));
+          handlers.onStatusChange('completed');
+          return;
+        }
+
+        if (ctx.input.includes('New delivery:')) {
+          backendAttempts += 1;
+          handlers.onTextDelta(`partial attempt ${backendAttempts}`);
+          if (backendAttempts <= terminalFailures) throw new Error(`request timeout ${backendAttempts}`);
+          handlers.onTextDelta('RESULT: backend succeeded after retry.');
+          handlers.onStatusChange('completed');
+          return;
+        }
+
+        if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Leader handled retry outcome.',
+            result: 'Leader completed after reviewing worker outcome.',
+          }));
+          handlers.onStatusChange('completed');
+        }
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const backend = team.members.find((member) => member.role === 'backend-coder')!;
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Exercise delivery retry.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(reader, (evs) => evs.some((event) => event.type === 'team_run_completed'));
+      expect(events.filter((event) => event.type === 'team_delivery_status_change' && event.attempt_id)).not.toHaveLength(0);
+      expect(backendAttempts).toBe(expectCompleted ? 2 : 3);
+
+      const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
+        run: { status: string };
+        messages: Array<{ kind: string; content: string; from_member_id: string | null }>;
+        deliveries: Array<{ delivery_id: string; to_member_id: string; status: string; error: string | null }>;
+        attempts: Array<{
+          attempt_id: string;
+          delivery_id: string;
+          attempt_number: number;
+          status: string;
+          output: string | null;
+          error: string | null;
+        }>;
+      }>;
+      const backendDelivery = runs[0].deliveries.find((delivery) => delivery.to_member_id === backend.member_id)!;
+      const attempts = runs[0].attempts.filter((attempt) => attempt.delivery_id === backendDelivery.delivery_id);
+      expect(attempts.map((attempt) => attempt.attempt_number)).toEqual(
+        expectCompleted ? [1, 2] : [1, 2, 3],
+      );
+      expect(attempts.at(0)).toMatchObject({ status: 'failed', error: 'request timeout 1' });
+
+      expect(attempts[0].output).toBeNull();
+      expect(runs[0].messages.filter((message) => message.kind === 'error')).toHaveLength(expectCompleted ? 0 : 1);
+
+      if (expectCompleted) {
+        expect(backendDelivery).toMatchObject({ status: 'done', error: null });
+        expect(attempts[1]).toMatchObject({ status: 'done', error: null });
+        expect(attempts[1].output).toContain('partial attempt 2');
+        expect(attempts[1].output).toContain('RESULT: backend succeeded after retry.');
+      } else {
+        expect(backendDelivery).toMatchObject({ status: 'failed', error: 'request timeout 3' });
+        expect(attempts[2]).toMatchObject({ status: 'failed', error: 'request timeout 3' });
+        expect(attempts[2].output).toContain('partial attempt 3');
+        expect(runs[0].messages.some((message) => message.kind === 'error' && message.content === 'request timeout 3')).toBe(true);
+      }
 
       await reader.cancel();
     } finally {

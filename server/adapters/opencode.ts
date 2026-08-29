@@ -46,6 +46,9 @@ export interface OpencodeSdk {
     permissionID: string,
     response: 'once' | 'always' | 'reject',
   ): Promise<void>;
+
+  /** Close the SDK-owned OpenCode server, if this SDK started one. */
+  close?(): void | Promise<void>;
 }
 
 /** A native session as the server lists it (the subset the adapter reads). */
@@ -156,8 +159,10 @@ export interface OpencodeEventState {
  */
 export interface OpenCodeRuntime {
   createClient(config: { baseUrl: string; throwOnError: true }): OpencodeClient;
-  createServer(options?: { config: { model: string } }): Promise<{ url: string; close(): void }>;
+  createServer(options?: { port?: number; config?: { model: string } }): Promise<{ url: string; close(): void }>;
 }
+
+const DEFAULT_OPENCODE_SERVER_PORT = 9999;
 
 export function createOpencodeSdk(
   config: { model?: string } = {},
@@ -166,6 +171,7 @@ export function createOpencodeSdk(
   const model = config.model ?? process.env.OPENCODE_MODEL;
   let client: OpencodeClient | undefined;
   let clientPromise: Promise<OpencodeClient> | undefined;
+  let ownedServer: { url: string; close(): void } | undefined;
 
   async function ensureClient(): Promise<OpencodeClient> {
     if (client) return client;
@@ -177,8 +183,11 @@ export function createOpencodeSdk(
     clientPromise ??= (async () => {
       const url = process.env.OPENCODE_URL;
       if (url) return runtime.createClient({ baseUrl: url, throwOnError: true });
-      const server = await runtime.createServer(model ? { config: { model } } : undefined);
-      return runtime.createClient({ baseUrl: server.url, throwOnError: true });
+      ownedServer = await runtime.createServer({
+        port: DEFAULT_OPENCODE_SERVER_PORT,
+        ...(model ? { config: { model } } : {}),
+      });
+      return runtime.createClient({ baseUrl: ownedServer.url, throwOnError: true });
     })();
     try {
       client = await clientPromise;
@@ -191,6 +200,15 @@ export function createOpencodeSdk(
   }
 
   return {
+    async close() {
+      await clientPromise?.catch(() => undefined);
+      client = undefined;
+      clientPromise = undefined;
+      const server = ownedServer;
+      ownedServer = undefined;
+      server?.close();
+    },
+
     async listModels(cwd) {
       const c = await ensureClient();
       const { data } = await c.config.providers({ throwOnError: true, query: { directory: cwd } });
@@ -281,6 +299,10 @@ export class OpenCodeAdapter extends BaseAdapter {
   async createSession(cwd: string, opts?: { name?: string }): Promise<{ real_session_id: string }> {
     const { id } = await this.sdk.createSession(cwd, opts);
     return { real_session_id: id };
+  }
+
+  async close(): Promise<void> {
+    await this.sdk.close?.();
   }
 
   async listSessions(cwd: string): Promise<NativeSession[]> {
