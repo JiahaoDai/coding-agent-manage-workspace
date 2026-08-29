@@ -549,7 +549,7 @@ describe('agent teams (v3 ticket #1)', () => {
     }
   });
 
-  it('creates isolated worktrees for read-write members before their sessions when enabled', async () => {
+  it('keeps a read-write leader in the original cwd while isolating read-write worker sessions', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dash-team-worktree-'));
     const repo = createCommittedGitRepo(dir);
     const { db, fake, server, baseUrl } = await startServer();
@@ -564,7 +564,7 @@ describe('agent teams (v3 ticket #1)', () => {
             agent: 'fake',
             model: null,
             responsibility_prompt: 'Plan and summarize work.',
-            file_access: 'read_only',
+            file_access: 'read_write',
           },
           {
             role: 'backend-coder',
@@ -596,7 +596,7 @@ describe('agent teams (v3 ticket #1)', () => {
 
       expect(created.cwd).toBe(repo);
       expect(leader).toMatchObject({
-        file_access: 'read_only',
+        file_access: 'read_write',
         execution_cwd: repo,
         worktree_path: null,
         worktree_branch: null,
@@ -608,6 +608,10 @@ describe('agent teams (v3 ticket #1)', () => {
         worktree_branch: expectedBackendBranch,
       });
       expect(fake.created).toEqual([repo, expectedBackendPath]);
+      expect((db.prepare(`SELECT cwd FROM session WHERE session_id = ?`).get(leader.session_id) as { cwd: string }).cwd).toBe(repo);
+      expect((db.prepare(`SELECT cwd FROM session WHERE session_id = ?`).get(backend.session_id) as { cwd: string }).cwd).toBe(
+        expectedBackendPath,
+      );
 
       const sessions = await (await fetch(`${baseUrl}/api/sessions`)).json() as SessionRecord[];
       expect(sessions).toHaveLength(0);
@@ -730,6 +734,13 @@ describe('agent teams (v3 ticket #1)', () => {
             responsibility_prompt: 'Lead work.',
             file_access: 'read_write',
           },
+          {
+            role: 'backend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Implement backend work.',
+            file_access: 'read_write',
+          },
         ],
       });
 
@@ -762,6 +773,13 @@ describe('agent teams (v3 ticket #1)', () => {
             responsibility_prompt: 'Lead work.',
             file_access: 'read_write',
           },
+          {
+            role: 'backend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Implement backend work.',
+            file_access: 'read_write',
+          },
         ],
       });
 
@@ -787,6 +805,13 @@ describe('agent teams (v3 ticket #1)', () => {
         worktree_isolation: true,
         members: [
           {
+            role: 'backend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Implement backend work.',
+            file_access: 'read_write',
+          },
+          {
             role: 'leader',
             agent: 'fake',
             model: null,
@@ -798,7 +823,7 @@ describe('agent teams (v3 ticket #1)', () => {
 
       expect(res.status).toBe(422);
       const body = await res.json() as { error: string };
-      expect(body.error).toContain('failed to create worktree for member leader');
+      expect(body.error).toContain('failed to create worktree for member backend-coder');
       expect(fake.created).toEqual([]);
       expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toEqual([]);
     } finally {

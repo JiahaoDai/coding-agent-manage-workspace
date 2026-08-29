@@ -203,7 +203,8 @@ export function createApp(deps: AppDeps): Hono {
     const teamMembers: TeamMemberRecord[] = [];
 
     try {
-      const gitRepository = worktree_isolation ? await resolveEligibleGitRepository(cwd) : null;
+      const needsMemberWorktrees = members.some(usesIsolatedMemberWorktree);
+      const gitRepository = worktree_isolation && needsMemberWorktrees ? await resolveEligibleGitRepository(cwd) : null;
       for (const member of members) {
         const adapter = deps.adapters.get(member.agent);
         if (!adapter) return c.json({ error: `unknown agent for member ${member.role}: ${member.agent}` }, 400);
@@ -224,7 +225,7 @@ export function createApp(deps: AppDeps): Hono {
 
       for (const member of members) {
         const adapter = deps.adapters.get(member.agent)!;
-        const memberWorkspace = gitRepository && member.file_access === 'read_write'
+        const memberWorkspace = gitRepository && usesIsolatedMemberWorktree(member)
           ? await createMemberWorktree(gitRepository, team.team_id, member.role, teamMembers.length)
           : {
               execution_cwd: cwd,
@@ -1773,7 +1774,7 @@ function validateCreateTeam(
   if (!roles.has('leader')) return { error: 'team requires a leader member' };
   const max_parallel_members = body.max_parallel_members ?? 1;
   const worktree_isolation = body.worktree_isolation === true;
-  if (max_parallel_members > 1 && members.some((member) => member.file_access === 'read_write') && !worktree_isolation) {
+  if (max_parallel_members > 1 && members.some(usesIsolatedMemberWorktree) && !worktree_isolation) {
     return { error: 'max_parallel_members above 1 with read_write members requires worktree_isolation' };
   }
 
@@ -1789,6 +1790,10 @@ interface MemberWorkspace {
   execution_cwd: string;
   worktree_path: string | null;
   worktree_branch: string | null;
+}
+
+function usesIsolatedMemberWorktree(member: Pick<TeamMemberInput, 'role' | 'file_access'>): boolean {
+  return member.file_access === 'read_write' && member.role !== 'leader';
 }
 
 async function resolveEligibleGitRepository(cwd: string): Promise<EligibleGitRepository> {
