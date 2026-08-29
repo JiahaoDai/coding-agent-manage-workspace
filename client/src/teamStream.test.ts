@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { appendTeamStreamDelta } from './App';
+import {
+  appendTeamStreamDelta,
+  DELIVERY_STREAM_HEAD_KEEP_CHARS,
+  DELIVERY_STREAM_TAIL_KEEP_CHARS,
+  MAX_DELIVERY_STREAM_CHARS,
+} from './App';
 import type { ServerEvent } from './types';
 
 function delta(
@@ -44,5 +49,38 @@ describe('appendTeamStreamDelta', () => {
     text = appendTeamStreamDelta(text, { ...delta('\n[thinking]  user\n'), stream_kind: undefined } as unknown as Extract<ServerEvent, { type: 'team_text_delta' }>);
 
     expect(text).toBe('[thinking] The user');
+  });
+
+  it('does not truncate delivery stream text below the display budget', () => {
+    const body = 'a'.repeat(MAX_DELIVERY_STREAM_CHARS - 100);
+
+    const text = appendTeamStreamDelta('', delta(body));
+
+    expect(text).toBe(body);
+    expect(text).not.toContain('[stream truncated: omitted');
+  });
+
+  it('truncates oversized delivery stream text while keeping the beginning and latest output', () => {
+    const head = 'H'.repeat(DELIVERY_STREAM_HEAD_KEEP_CHARS);
+    const middle = 'M'.repeat(500);
+    const tail = 'T'.repeat(DELIVERY_STREAM_TAIL_KEEP_CHARS);
+
+    const text = appendTeamStreamDelta('', delta(`${head}${middle}${tail}`));
+
+    expect(text.startsWith(head)).toBe(true);
+    expect(text.endsWith(tail)).toBe(true);
+    expect(text).toContain('[stream truncated: omitted 500 characters]');
+    expect(text.length).toBeGreaterThan(MAX_DELIVERY_STREAM_CHARS);
+    expect(text.length).toBeLessThan(MAX_DELIVERY_STREAM_CHARS + 80);
+  });
+
+  it('updates a single truncation marker across repeated appends and keeps text bounded', () => {
+    let text = appendTeamStreamDelta('', delta(`${'H'.repeat(DELIVERY_STREAM_HEAD_KEEP_CHARS)}${'M'.repeat(500)}${'T'.repeat(DELIVERY_STREAM_TAIL_KEEP_CHARS)}`));
+    text = appendTeamStreamDelta(text, delta('N'.repeat(1_000)));
+
+    expect(text.match(/\[stream truncated: omitted/g)).toHaveLength(1);
+    expect(text).toContain('[stream truncated: omitted 1500 characters]');
+    expect(text.endsWith('N'.repeat(1_000))).toBe(true);
+    expect(text.length).toBeLessThan(MAX_DELIVERY_STREAM_CHARS + 80);
   });
 });

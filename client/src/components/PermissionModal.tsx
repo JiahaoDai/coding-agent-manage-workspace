@@ -1,5 +1,27 @@
 import type { PermissionRequest } from '../types';
 
+export const MAX_PERMISSION_INPUT_PREVIEW_CHARS = 20_000;
+const PERMISSION_INPUT_HEAD_KEEP_CHARS = 4_000;
+const PERMISSION_INPUT_TAIL_KEEP_CHARS = 16_000;
+
+export function formatPermissionInputPreview(input: unknown): string {
+  const text = stringifyPermissionInput(input);
+  if (text.length <= MAX_PERMISSION_INPUT_PREVIEW_CHARS) return text;
+
+  const head = text.slice(0, PERMISSION_INPUT_HEAD_KEEP_CHARS);
+  const tail = text.slice(-PERMISSION_INPUT_TAIL_KEEP_CHARS);
+  const omittedChars = text.length - head.length - tail.length;
+  return `${head}\n\n[permission input truncated: omitted ${omittedChars} characters]\n\n${tail}`;
+}
+
+function stringifyPermissionInput(input: unknown): string {
+  try {
+    return JSON.stringify(input, null, 2);
+  } catch {
+    return String(input);
+  }
+}
+
 /**
  * Modal shown when an agent wants to run a tool that needs the user's ok. It
  * displays the tool name and its arguments; Allow/Deny is the only way out —
@@ -16,6 +38,7 @@ export function PermissionModal({
   onDecision: (decision: 'allow' | 'deny') => void;
 }) {
   const team = request.team_context;
+  const inputPreview = formatPermissionInputPreview(request.input);
   return (
     <div className="permission-overlay" role="dialog" aria-modal="true" aria-labelledby="permission-title">
       <div className="permission-modal">
@@ -86,7 +109,7 @@ export function PermissionModal({
           <span className="permission-tool-name">{request.tool_name}</span>
           <span className="permission-tool-args-label">Arguments</span>
         </div>
-        <pre className="permission-args">{JSON.stringify(request.input, null, 2)}</pre>
+        <pre className="permission-args">{inputPreview}</pre>
 
         <div className="permission-actions">
           <button type="button" className="btn btn-secondary btn-deny" onClick={() => onDecision('deny')}>

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { ConversationView } from './ConversationView';
-import { PermissionModal } from './PermissionModal';
+import { formatPermissionInputPreview, MAX_PERMISSION_INPUT_PREVIEW_CHARS, PermissionModal } from './PermissionModal';
 import { TeamChatView } from './TeamChatView';
 import type { SessionRecord, TeamWithMembers } from '../types';
 
@@ -324,6 +324,14 @@ describe('TeamChatView', () => {
 });
 
 describe('PermissionModal', () => {
+  it('truncates oversized permission input previews', () => {
+    const preview = formatPermissionInputPreview({ command: 'x'.repeat(MAX_PERMISSION_INPUT_PREVIEW_CHARS + 500) });
+
+    expect(preview).toContain('[permission input truncated: omitted');
+    expect(preview.length).toBeLessThan(MAX_PERMISSION_INPUT_PREVIEW_CHARS + 100);
+    expect(preview).not.toContain('x'.repeat(MAX_PERMISSION_INPUT_PREVIEW_CHARS + 200));
+  });
+
   it('renders ordinary session permission requests without team context', () => {
     const markup = renderToStaticMarkup(
       <PermissionModal

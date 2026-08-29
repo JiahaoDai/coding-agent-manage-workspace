@@ -163,15 +163,51 @@ function deliveryLiveInputText(label: string, content: string): string {
 
 type TeamTextDeltaEvent = Extract<ServerEvent, { type: 'team_text_delta' }>;
 
+export const MAX_DELIVERY_STREAM_CHARS = 80_000;
+export const DELIVERY_STREAM_HEAD_KEEP_CHARS = 8_000;
+export const DELIVERY_STREAM_TAIL_KEEP_CHARS = 72_000;
+const STREAM_TRUNCATION_PATTERN = /\n\n\[stream truncated: omitted (\d+) characters\]\n\n/;
+
 export function appendTeamStreamDelta(existingText: string, event: TeamTextDeltaEvent): string {
   const legacy = parseLegacyTeamProcessLine(event.text);
   const streamKind = event.stream_kind ?? legacy?.streamKind ?? 'text';
   const streamLabel = event.stream_label ?? legacy?.streamLabel ?? streamKind;
   const text = event.stream_kind ? event.text : (legacy?.text ?? event.text);
 
-  if (streamKind === 'thinking') return appendThinkingDelta(existingText, text);
-  if (streamKind === 'tool' || streamKind === 'status') return appendProcessLine(existingText, streamLabel, text);
-  return appendRawTeamTextDelta(existingText, text);
+  const nextText =
+    streamKind === 'thinking'
+      ? appendThinkingDelta(existingText, text)
+      : streamKind === 'tool' || streamKind === 'status'
+        ? appendProcessLine(existingText, streamLabel, text)
+        : appendRawTeamTextDelta(existingText, text);
+  return boundDeliveryStreamText(nextText);
+}
+
+export function boundDeliveryStreamText(text: string): string {
+  const parsed = parseBoundedDeliveryStreamText(text);
+  const visibleText = `${parsed.head}${parsed.tail}`;
+  if (visibleText.length <= MAX_DELIVERY_STREAM_CHARS) {
+    return parsed.omittedChars > 0 ? `${parsed.head}${streamTruncationMarker(parsed.omittedChars)}${parsed.tail}` : visibleText;
+  }
+
+  const head = visibleText.slice(0, DELIVERY_STREAM_HEAD_KEEP_CHARS);
+  const tail = visibleText.slice(-DELIVERY_STREAM_TAIL_KEEP_CHARS);
+  const omittedChars = parsed.omittedChars + visibleText.length - head.length - tail.length;
+  return `${head}${streamTruncationMarker(omittedChars)}${tail}`;
+}
+
+function parseBoundedDeliveryStreamText(text: string): { head: string; tail: string; omittedChars: number } {
+  const match = STREAM_TRUNCATION_PATTERN.exec(text);
+  if (!match) return { head: text, tail: '', omittedChars: 0 };
+  return {
+    head: text.slice(0, match.index),
+    tail: text.slice(match.index + match[0].length),
+    omittedChars: Number(match[1]),
+  };
+}
+
+function streamTruncationMarker(omittedChars: number): string {
+  return `\n\n[stream truncated: omitted ${omittedChars} characters]\n\n`;
 }
 
 function appendRawTeamTextDelta(existingText: string, text: string): string {
