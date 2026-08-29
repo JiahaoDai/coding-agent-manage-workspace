@@ -1798,6 +1798,7 @@ function usesIsolatedMemberWorktree(member: Pick<TeamMemberInput, 'role' | 'file
 
 async function resolveEligibleGitRepository(cwd: string): Promise<EligibleGitRepository> {
   const inside = await runGit(cwd, ['rev-parse', '--is-inside-work-tree']).catch((err) => {
+    rethrowGitUnavailable(err);
     throw new Error(`worktree isolation requires cwd to be inside a git repository: ${errorMessage(err)}`);
   });
   if (inside.stdout.trim() !== 'true') {
@@ -1805,10 +1806,12 @@ async function resolveEligibleGitRepository(cwd: string): Promise<EligibleGitRep
   }
 
   const topLevel = await runGit(cwd, ['rev-parse', '--show-toplevel']).catch((err) => {
+    rethrowGitUnavailable(err);
     throw new Error(`worktree isolation could not find the git repository root: ${errorMessage(err)}`);
   });
   const root = resolve(topLevel.stdout.trim());
   await runGit(root, ['rev-parse', '--verify', 'HEAD']).catch((err) => {
+    rethrowGitUnavailable(err);
     throw new Error(`worktree isolation requires a git repository with an initial commit: ${errorMessage(err)}`);
   });
 
@@ -1828,6 +1831,7 @@ async function createMemberWorktree(
     await mkdir(dirname(worktreePath), { recursive: true });
     await runGit(repository.root, ['worktree', 'add', '-b', branch, worktreePath, 'HEAD']);
   } catch (err) {
+    rethrowGitUnavailable(err);
     throw new Error(`failed to create worktree for member ${role}: ${errorMessage(err)}`);
   }
   return {
@@ -1847,6 +1851,7 @@ async function removeTeamWorktrees(team: TeamWithMembers): Promise<void> {
   for (const worktreePath of worktreePaths) {
     if (!(await pathExists(worktreePath))) continue;
     await runGit(repository.root, ['worktree', 'remove', '--force', worktreePath]).catch((err) => {
+      rethrowGitUnavailable(err);
       throw new Error(`failed to remove worktree ${worktreePath}: ${errorMessage(err)}`);
     });
   }
@@ -1861,8 +1866,27 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+class GitUnavailableError extends Error {
+  constructor() {
+    super('worktree isolation requires git to be installed and available on PATH');
+  }
+}
+
+function rethrowGitUnavailable(err: unknown): void {
+  if (err instanceof GitUnavailableError) throw err;
+}
+
 async function runGit(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-  return execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+  try {
+    return await execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+  } catch (err) {
+    if (isMissingExecutableError(err)) throw new GitUnavailableError();
+    throw err;
+  }
+}
+
+function isMissingExecutableError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT';
 }
 
 function slugForWorktree(value: string): string {

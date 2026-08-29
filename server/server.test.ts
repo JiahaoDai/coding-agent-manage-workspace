@@ -754,6 +754,45 @@ describe('agent teams (v3 ticket #1)', () => {
     }
   });
 
+  it('rejects worktree isolation with a clear error when git is unavailable', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-team-git-missing-'));
+    const originalPath = process.env.PATH;
+    const { db, server, baseUrl } = await startServer();
+    try {
+      process.env.PATH = join(dir, 'no-git-here');
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'No Git Binary Team',
+        cwd: dir,
+        worktree_isolation: true,
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Lead work.',
+            file_access: 'read_write',
+          },
+          {
+            role: 'backend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Implement backend work.',
+            file_access: 'read_write',
+          },
+        ],
+      });
+
+      expect(res.status).toBe(422);
+      const body = await res.json() as { error: string };
+      expect(body.error).toBe('worktree isolation requires git to be installed and available on PATH');
+    } finally {
+      process.env.PATH = originalPath;
+      server.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects worktree isolation when the git repository has no initial commit', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dash-team-empty-git-'));
     const repo = join(dir, 'project');
