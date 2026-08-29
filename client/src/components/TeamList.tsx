@@ -38,7 +38,7 @@ export function TeamList({
             className="session-item-delete team-list-delete"
             onClick={() => onDelete(team.team_id)}
             aria-label={`Delete ${team.name}`}
-            title="Delete team (member sessions are removed)"
+            title="Delete team and clean isolated worktrees when safe"
           >
             <TrashIcon />
           </button>

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { access, mkdir } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { Hono } from 'hono';
@@ -91,8 +91,18 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(deps.store.listTeamRuns(team_id));
   });
 
-  app.delete('/api/teams/:id', (c) => {
-    const removed = deps.store.deleteTeam(c.req.param('id'));
+  app.delete('/api/teams/:id', async (c) => {
+    const team_id = c.req.param('id');
+    const team = deps.store.getTeam(team_id);
+    if (!team) return c.json({ error: 'team not found' }, 404);
+
+    try {
+      await removeTeamWorktrees(team);
+    } catch (err) {
+      return c.json({ error: errorMessage(err) }, 409);
+    }
+
+    const removed = deps.store.deleteTeam(team_id);
     return removed ? c.json({ ok: true }) : c.json({ error: 'team not found' }, 404);
   });
 
@@ -1820,6 +1830,30 @@ async function createMemberWorktree(
     worktree_path: worktreePath,
     worktree_branch: branch,
   };
+}
+
+async function removeTeamWorktrees(team: TeamWithMembers): Promise<void> {
+  const worktreePaths = Array.from(
+    new Set(team.members.map((member) => member.worktree_path).filter((path): path is string => Boolean(path))),
+  );
+  if (worktreePaths.length === 0) return;
+
+  const repository = await resolveEligibleGitRepository(team.cwd);
+  for (const worktreePath of worktreePaths) {
+    if (!(await pathExists(worktreePath))) continue;
+    await runGit(repository.root, ['worktree', 'remove', '--force', worktreePath]).catch((err) => {
+      throw new Error(`failed to remove worktree ${worktreePath}: ${errorMessage(err)}`);
+    });
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function runGit(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {

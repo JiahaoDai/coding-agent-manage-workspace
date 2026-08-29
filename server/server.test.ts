@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -613,6 +613,100 @@ describe('agent teams (v3 ticket #1)', () => {
       expect(sessions).toHaveLength(0);
       const branch = execFileSync('git', ['-C', expectedBackendPath, 'branch', '--show-current'], { encoding: 'utf8' }).trim();
       expect(branch).toBe(expectedBackendBranch);
+    } finally {
+      server.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('removes clean isolated worktrees when deleting a team', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-team-worktree-delete-'));
+    const repo = createCommittedGitRepo(dir);
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'Disposable Isolated Team',
+        cwd: repo,
+        worktree_isolation: true,
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Plan and summarize work.',
+            file_access: 'read_only',
+          },
+          {
+            role: 'backend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Implement backend changes.',
+            file_access: 'read_write',
+          },
+        ],
+      });
+      expect(res.status).toBe(201);
+
+      const created = await res.json() as {
+        team_id: string;
+        members: Array<{ role: string; worktree_path: string | null }>;
+      };
+      const worktreePath = created.members.find((member) => member.role === 'backend-coder')!.worktree_path!;
+      expect(existsSync(worktreePath)).toBe(true);
+
+      const deleteRes = await fetch(`${baseUrl}/api/teams/${created.team_id}`, { method: 'DELETE' });
+      expect(deleteRes.status).toBe(200);
+
+      expect(existsSync(worktreePath)).toBe(false);
+      expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toEqual([]);
+    } finally {
+      server.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('removes dirty isolated worktrees when deleting a team', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-team-worktree-dirty-delete-'));
+    const repo = createCommittedGitRepo(dir);
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'Dirty Isolated Team',
+        cwd: repo,
+        worktree_isolation: true,
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Plan and summarize work.',
+            file_access: 'read_only',
+          },
+          {
+            role: 'backend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Implement backend changes.',
+            file_access: 'read_write',
+          },
+        ],
+      });
+      expect(res.status).toBe(201);
+
+      const created = await res.json() as {
+        team_id: string;
+        members: Array<{ role: string; worktree_path: string | null }>;
+      };
+      const worktreePath = created.members.find((member) => member.role === 'backend-coder')!.worktree_path!;
+      writeFileSync(join(worktreePath, 'uncommitted.txt'), 'draft work\n');
+
+      const deleteRes = await fetch(`${baseUrl}/api/teams/${created.team_id}`, { method: 'DELETE' });
+      expect(deleteRes.status).toBe(200);
+
+      expect(existsSync(worktreePath)).toBe(false);
+      expect(await (await fetch(`${baseUrl}/api/teams`)).json()).toEqual([]);
     } finally {
       server.close();
       db.close();
