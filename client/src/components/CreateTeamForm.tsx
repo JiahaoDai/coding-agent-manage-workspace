@@ -38,13 +38,15 @@ export function CreateTeamForm({
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState('');
   const [worktreeIsolation, setWorktreeIsolation] = useState(false);
-  const [maxParallelMembers, setMaxParallelMembers] = useState(1);
+  const [maxParallelMembers, setMaxParallelMembers] = useState('1');
   const [members, setMembers] = useState<TeamMemberInput[]>([defaultMember('leader')]);
   const [fsRoot, setFsRoot] = useState<{ root: string; name: string } | null>(null);
   const [fsError, setFsError] = useState<string | null>(null);
   const [modelLookups, setModelLookups] = useState<Record<string, ModelLookup>>({});
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const parsedMaxParallelMembers = parseParallelMembers(maxParallelMembers);
+  const maxParallelMembersError = parallelMembersError(maxParallelMembers);
 
   useEffect(() => {
     void getFsRoot()
@@ -86,6 +88,7 @@ export function CreateTeamForm({
     name.trim() !== '' &&
     cwd.trim() !== '' &&
     members.length > 0 &&
+    parsedMaxParallelMembers !== null &&
     members.every((member) => member.role.trim() !== '' && member.agent !== '' && member.responsibility_prompt.trim() !== '') &&
     !submitting;
 
@@ -107,13 +110,17 @@ export function CreateTeamForm({
 
   async function handleSubmit() {
     setError(null);
+    if (parsedMaxParallelMembers === null) {
+      setError('Max parallel members must be a number from 1 to 8.');
+      return;
+    }
     setSubmitting(true);
     try {
       const team = await createTeam({
         name: name.trim(),
         cwd: cwd.trim(),
         worktree_isolation: worktreeIsolation,
-        max_parallel_members: maxParallelMembers,
+        max_parallel_members: parsedMaxParallelMembers,
         members: members.map((member) => ({
           ...member,
           role: member.role.trim(),
@@ -180,13 +187,21 @@ export function CreateTeamForm({
       <label className="field">
         <span className="field-label">Max parallel members</span>
         <input
-          type="number"
-          min={1}
-          max={8}
-          step={1}
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
           value={maxParallelMembers}
-          onChange={(event) => setMaxParallelMembers(clampParallelMembers(event.target.valueAsNumber))}
+          aria-invalid={maxParallelMembersError ? 'true' : undefined}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (/^\d*$/.test(next)) setMaxParallelMembers(next);
+          }}
         />
+        {maxParallelMembersError ? (
+          <span className="field-help field-error">{maxParallelMembersError}</span>
+        ) : (
+          <span className="field-help">Use a number from 1 to 8.</span>
+        )}
       </label>
 
       <fieldset className="team-members-field">
@@ -291,9 +306,20 @@ export function CreateTeamForm({
   );
 }
 
-function clampParallelMembers(value: number): number {
-  if (!Number.isFinite(value)) return 1;
-  return Math.min(8, Math.max(1, Math.trunc(value)));
+export function parseParallelMembers(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 8) return null;
+  return parsed;
+}
+
+function parallelMembersError(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed === '') return 'Enter a number from 1 to 8.';
+  if (!/^\d+$/.test(trimmed)) return 'Use digits only.';
+  if (parseParallelMembers(trimmed) === null) return 'Maximum is 8.';
+  return null;
 }
 
 function modelLookupKey(cwd: string, agent: string): string {

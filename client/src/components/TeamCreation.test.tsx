@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { CreateTeamForm } from './CreateTeamForm';
+import { CreateTeamForm, parseParallelMembers } from './CreateTeamForm';
 import { TeamList } from './TeamList';
 import { TeamOverview } from './TeamOverview';
 import type { TeamWithMembers } from '../types';
@@ -62,6 +62,7 @@ describe('team creation UI', () => {
     expect(markup).toContain('Select a directory first');
     expect(markup).toContain('Use git worktree isolation for read/write members');
     expect(markup).toContain('Max parallel members');
+    expect(markup).toContain('Use a number from 1 to 8.');
     expect(markup).toContain('File access');
     expect(markup).toContain('Role prompt');
   });
@@ -70,7 +71,7 @@ describe('team creation UI', () => {
     const markup = renderToStaticMarkup(<TeamOverview team={team} />);
 
     expect(markup).toContain('Product Builder');
-    expect(markup).toContain('parallel 1');
+    expect(markup).toContain('Concurrency 1');
     expect(markup).toContain('/project');
     expect(markup).toContain('leader');
     expect(markup).toContain('fake · default model');
@@ -94,5 +95,15 @@ describe('team creation UI', () => {
     expect(markup).toContain('Product Builder');
     expect(markup).toContain('Delete Product Builder');
     expect(markup).toContain('team-list-delete');
+  });
+
+  it('validates max parallel members as a 1 to 8 integer', () => {
+    expect(parseParallelMembers('1')).toBe(1);
+    expect(parseParallelMembers('8')).toBe(8);
+    expect(parseParallelMembers('')).toBeNull();
+    expect(parseParallelMembers('0')).toBeNull();
+    expect(parseParallelMembers('9')).toBeNull();
+    expect(parseParallelMembers('2.5')).toBeNull();
+    expect(parseParallelMembers('abc')).toBeNull();
   });
 });

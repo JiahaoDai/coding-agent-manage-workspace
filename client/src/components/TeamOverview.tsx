@@ -16,9 +16,11 @@ export function TeamOverview({
           <p className="team-overview-cwd" title={team.cwd}>
             {team.cwd}
           </p>
+          <p className="team-concurrency" title="Maximum team members that can run at the same time">
+            Concurrency {team.max_parallel_members}
+          </p>
         </div>
         <div className="team-overview-statuses">
-          <span className="team-status">parallel {team.max_parallel_members}</span>
           <span className="team-status">{team.status}</span>
         </div>
       </div>

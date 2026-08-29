@@ -849,6 +849,10 @@ button {
   color: var(--text-secondary);
 }
 
+.field-error {
+  color: var(--status-error);
+}
+
 .field input,
 .field select,
 .field textarea {
@@ -1149,6 +1153,17 @@ button {
   overflow-wrap: anywhere;
 }
 
+.team-concurrency {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .team-overview-statuses {
   display: flex;
   flex-wrap: wrap;
@@ -1324,6 +1339,11 @@ button {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.team-chat-heading .team-concurrency {
+  flex: 0 0 auto;
+  margin: 0 0 0 4px;
 }
 
 .team-chat-body {
@@ -2276,15 +2296,24 @@ button:focus-visible {
 }
 
 .permission-modal {
-  width: min(100%, 460px);
+  width: min(100%, 760px);
+  max-height: calc(100vh - 48px);
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
-  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.permission-modal-body {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  min-height: 0;
+  padding: 22px;
+  overflow-y: auto;
 }
 
 .permission-header {
@@ -2395,7 +2424,8 @@ button:focus-visible {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.8rem;
   line-height: 1.5;
-  overflow-x: auto;
+  max-height: min(42vh, 360px);
+  overflow: auto;
   white-space: pre;
 }
 
@@ -2403,6 +2433,10 @@ button:focus-visible {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+  flex-shrink: 0;
+  padding: 14px 22px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
 }
 
 .btn-deny {
@@ -2420,5 +2454,25 @@ button:focus-visible {
 @media (max-width: 640px) {
   .sidebar {
     width: 220px;
+  }
+
+  .permission-overlay {
+    padding: 12px;
+  }
+
+  .permission-modal {
+    max-height: calc(100vh - 24px);
+  }
+
+  .permission-modal-body {
+    padding: 18px;
+  }
+
+  .permission-context {
+    grid-template-columns: 1fr;
+  }
+
+  .permission-actions {
+    padding: 12px 18px 16px;
   }
 }
