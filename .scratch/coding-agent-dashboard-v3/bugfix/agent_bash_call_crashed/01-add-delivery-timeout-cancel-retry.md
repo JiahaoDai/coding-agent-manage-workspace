@@ -153,7 +153,7 @@ Keep the UI small and operational. This is recovery machinery, not a new plannin
 
 Add server tests for:
 
-- Timeout marks delivery attempt and delivery failed.
+- Timeout marks delivery attempt and delivery failed.(test timeout use little DEFAULT_TEAM_DELIVERY_TIMEOUT_MS)
 - Timeout calls adapter abort when supported.
 - Timeout still marks delivery failed when adapter abort is unsupported.
 - Cancel endpoint is idempotent.
