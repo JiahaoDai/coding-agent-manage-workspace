@@ -128,5 +128,6 @@ export interface CreateTeamInput {
   name: string;
   cwd: string;
   worktree_isolation?: boolean;
+  max_parallel_members?: number;
   members: TeamMemberInput[];
 }

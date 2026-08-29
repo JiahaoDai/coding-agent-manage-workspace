@@ -178,14 +178,14 @@ export function createApp(deps: AppDeps): Hono {
     const validation = validateCreateTeam(body);
     if ('error' in validation) return c.json({ error: validation.error }, 400);
 
-    const { name, cwd, members, worktree_isolation } = validation.value;
+    const { name, cwd, members, worktree_isolation, max_parallel_members } = validation.value;
     const now = Date.now();
     const team: TeamRecord = {
       team_id: randomUUID(),
       name,
       cwd,
       status: 'idle',
-      max_parallel_members: 1,
+      max_parallel_members: max_parallel_members ?? 1,
       create_time: now,
       modify_time: now,
     };
@@ -632,7 +632,7 @@ async function runLeaderOnlyDelivery({
       broadcastLeaderText(delta);
     },
     onToolCallStart: (tool_call_id, name, input) => {
-      broadcastLeaderText(`${name} ${tool_call_id} ${formatTeamToolInput(input)}`, 'tool', 'tool start');
+      broadcastLeaderText(formatTeamToolActivity(tool_call_id, name, input), 'tool', 'tool start');
     },
     onToolCallEnd: (tool_call_id) => {
       broadcastLeaderText(tool_call_id, 'tool', 'tool end');
@@ -856,8 +856,10 @@ async function runTeamOrchestrator({
   run_id: string;
 }): Promise<void> {
   for (;;) {
+    const currentTeam = deps.store.getTeam(team_id);
     const currentRun = deps.store.getTeamRun(run_id)?.run;
     if (!currentRun || currentRun.status !== 'running') break;
+    const maxParallelMembers = currentTeam?.max_parallel_members ?? 1;
 
     const released = deps.store.releaseSatisfiedBlockedDeliveries(run_id);
     for (const delivery of released) {
@@ -871,19 +873,50 @@ async function runTeamOrchestrator({
       });
     }
 
-    const claimed = claimNextDeliveryForCurrentWave(deps, run_id);
-    if (!claimed) break;
+    let claimedAny = false;
+    for (;;) {
+      const claimed = claimNextDeliveryForCurrentWave(deps, run_id, maxParallelMembers);
+      if (!claimed) break;
+      claimedAny = true;
 
-    deps.sse.broadcast({
-      type: 'team_delivery_status_change',
-      team_id,
-      run_id,
-      delivery_id: claimed.delivery.delivery_id,
-      attempt_id: claimed.attempt.attempt_id,
-      member_id: claimed.member.member_id,
-      status: 'running',
-    });
+      deps.sse.broadcast({
+        type: 'team_delivery_status_change',
+        team_id,
+        run_id,
+        delivery_id: claimed.delivery.delivery_id,
+        attempt_id: claimed.attempt.attempt_id,
+        member_id: claimed.member.member_id,
+        status: 'running',
+      });
 
+      dispatchClaimedTeamDelivery({
+        deps,
+        permissions,
+        claimed,
+      });
+    }
+
+    if (!claimedAny) break;
+  }
+
+  deps.store.completeRunIfNoOpenDeliveries(run_id);
+}
+
+function dispatchClaimedTeamDelivery({
+  deps,
+  permissions,
+  claimed,
+}: {
+  deps: AppDeps;
+  permissions: PermissionBroker;
+  claimed: {
+    delivery: TeamMessageDeliveryRecord;
+    attempt: TeamDeliveryAttemptRecord;
+    message: TeamMessageRecord;
+    member: TeamMemberRecord;
+  };
+}): void {
+  void (async () => {
     if (claimed.member.role === 'leader') {
       await runClaimedLeaderFollowUpDelivery({
         deps,
@@ -903,13 +936,18 @@ async function runTeamOrchestrator({
         member: claimed.member,
       });
     }
-  }
-
-  deps.store.completeRunIfNoOpenDeliveries(run_id);
+  })().finally(() => {
+    void runTeamOrchestrator({
+      deps,
+      permissions,
+      team_id: claimed.delivery.team_id,
+      run_id: claimed.delivery.run_id,
+    });
+  });
 }
 
-function claimNextDeliveryForCurrentWave(deps: AppDeps, run_id: string) {
-  const nonLeader = deps.store.claimNextRunnableTeamDelivery(run_id, { includeLeader: false });
+function claimNextDeliveryForCurrentWave(deps: AppDeps, run_id: string, maxParallelMembers: number) {
+  const nonLeader = deps.store.claimNextRunnableTeamDelivery(run_id, { includeLeader: false, maxRunning: maxParallelMembers });
   if (nonLeader) return nonLeader;
 
   // Keep leader follow-up behind the current worker/reviewer wave. Pending
@@ -917,7 +955,7 @@ function claimNextDeliveryForCurrentWave(deps: AppDeps, run_id: string) {
   // orchestrator wake-up run before the leader consumes the inbox.
   if (deps.store.hasActiveNonLeaderTeamDeliveries(run_id)) return undefined;
 
-  return deps.store.claimNextRunnableTeamDelivery(run_id);
+  return deps.store.claimNextRunnableTeamDelivery(run_id, { maxRunning: maxParallelMembers });
 }
 
 function markLeaderWaitingForUser({
@@ -1136,7 +1174,7 @@ async function runClaimedLeaderFollowUpDelivery({
       broadcastLeaderText(delta);
     },
     onToolCallStart: (tool_call_id, name, input) => {
-      broadcastLeaderText(`${name} ${tool_call_id} ${formatTeamToolInput(input)}`, 'tool', 'tool start');
+      broadcastLeaderText(formatTeamToolActivity(tool_call_id, name, input), 'tool', 'tool start');
     },
     onToolCallEnd: (tool_call_id) => {
       broadcastLeaderText(tool_call_id, 'tool', 'tool end');
@@ -1437,7 +1475,7 @@ async function runClaimedTeamDelivery({
         delivery_id: delivery.delivery_id,
         attempt_id: attempt.attempt_id,
         member_id: member.member_id,
-        text: `${name} ${tool_call_id} ${formatTeamToolInput(input)}`,
+        text: formatTeamToolActivity(tool_call_id, name, input),
         stream_kind: 'tool',
         stream_label: 'tool start',
       });
@@ -1688,6 +1726,12 @@ function validateCreateTeam(
   if (body.worktree_isolation !== undefined && typeof body.worktree_isolation !== 'boolean') {
     return { error: 'worktree_isolation must be a boolean' };
   }
+  if (
+    body.max_parallel_members !== undefined &&
+    (!Number.isInteger(body.max_parallel_members) || body.max_parallel_members < 1 || body.max_parallel_members > 8)
+  ) {
+    return { error: 'max_parallel_members must be an integer between 1 and 8' };
+  }
   if (!Array.isArray(body.members) || body.members.length === 0) return { error: 'members are required' };
 
   const roles = new Set<string>();
@@ -1717,8 +1761,13 @@ function validateCreateTeam(
     });
   }
   if (!roles.has('leader')) return { error: 'team requires a leader member' };
+  const max_parallel_members = body.max_parallel_members ?? 1;
+  const worktree_isolation = body.worktree_isolation === true;
+  if (max_parallel_members > 1 && members.some((member) => member.file_access === 'read_write') && !worktree_isolation) {
+    return { error: 'max_parallel_members above 1 with read_write members requires worktree_isolation' };
+  }
 
-  return { value: { name: body.name.trim(), cwd: body.cwd.trim(), worktree_isolation: body.worktree_isolation === true, members } };
+  return { value: { name: body.name.trim(), cwd: body.cwd.trim(), worktree_isolation, max_parallel_members, members } };
 }
 
 interface EligibleGitRepository {
@@ -1853,6 +1902,13 @@ function formatTeamToolInput(input: unknown): string {
   } catch {
     return String(input);
   }
+}
+
+function formatTeamToolActivity(tool_call_id: string, name: string, input: unknown): string {
+  const formatted = `${name} ${tool_call_id} ${formatTeamToolInput(input)}`;
+  if (classifyTeamToolAction(name, input) !== 'write') return formatted;
+  const paths = extractToolPaths(input);
+  return paths.length > 0 ? `${formatted}\nTouched-file hints: ${paths.join(', ')}` : formatted;
 }
 
 function teamPermissionContext({
@@ -2076,7 +2132,7 @@ function leaderOnlyPrompt({
     '{"type":"need_user_input","question":"clear question for the user"}',
     '',
     'Plan shape:',
-    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task_type":"analysis|review|implementation|fix","requires_file_write":false,"task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
+    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task_type":"analysis|review|implementation|fix","requires_file_write":false,"expected_files":["relative/path.ts"],"task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
   ].join('\n');
 }
 
@@ -2148,7 +2204,7 @@ function leaderFollowUpPrompt({
     '{"type":"need_user_input","question":"clear question for the user"}',
     '',
     'Plan shape:',
-    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task_type":"analysis|review|implementation|fix","requires_file_write":false,"task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
+    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task_type":"analysis|review|implementation|fix","requires_file_write":false,"expected_files":["relative/path.ts"],"task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
   ].join('\n');
 }
 
@@ -2192,7 +2248,7 @@ function leaderJsonRetryPrompt(previous: string, error: string): string {
     'Allowed shapes:',
     '{"type":"final","summary":"short summary","result":"final answer for the user"}',
     '{"type":"need_user_input","question":"clear question for the user"}',
-    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task_type":"analysis|review|implementation|fix","requires_file_write":false,"task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
+    '{"type":"plan","summary":"short summary","assignments":[{"id":"stable-id","to":"member-role","task_type":"analysis|review|implementation|fix","requires_file_write":false,"expected_files":["relative/path.ts"],"task":"task text","context":"useful context","depends_on":[],"dependency_type":"success"}]}',
     '',
     'Strict JSON reminders:',
     '- Escape every double quote inside string values as \\".',
@@ -2250,6 +2306,8 @@ interface ValidatedPlanAssignment {
   context: string;
   task_type: string;
   requires_file_write: boolean;
+  expected_files: string[];
+  overlap_warnings: string[];
   delivery_id: string;
   dependencies: Array<{ depends_on_delivery_id: string; dependency_type: TeamDeliveryDependencyType }>;
   depends_on: string[];
@@ -2395,6 +2453,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// handle expected_file(pre estimate file to be modified), just use for warning if two members modify this file
 function validateLeaderPlan(raw: Record<string, unknown>, members: TeamWithMembers['members']): LeaderOutcome {
   const summary = typeof raw.summary === 'string' ? raw.summary.trim() : '';
   if (!summary) return { error: 'leader plan summary is required' };
@@ -2413,6 +2472,7 @@ function validateLeaderPlan(raw: Record<string, unknown>, members: TeamWithMembe
     context: string;
     task_type: string;
     requires_file_write: boolean;
+    expected_files: string[];
     depends_on: string[];
     dependency_type: TeamDeliveryDependencyType;
   }> = [];
@@ -2446,6 +2506,8 @@ function validateLeaderPlan(raw: Record<string, unknown>, members: TeamWithMembe
     if (writeRequired && member.file_access === 'read_only') {
       return { error: `assignment ${id} requires file write access but target member ${member.role} is read_only` };
     }
+    const expectedFiles = parseExpectedFiles(assignment.expected_files, id);
+    if ('error' in expectedFiles) return expectedFiles;
     const rawDependsOn = assignment.depends_on ?? [];
     if (!Array.isArray(rawDependsOn) || rawDependsOn.some((dep) => typeof dep !== 'string' || dep.trim() === '')) {
       return { error: `assignment ${id} depends_on must be an array of assignment ids` };
@@ -2465,11 +2527,13 @@ function validateLeaderPlan(raw: Record<string, unknown>, members: TeamWithMembe
       context,
       task_type,
       requires_file_write,
+      expected_files: expectedFiles.value,
       depends_on: rawDependsOn.map((dep) => dep.trim()),
       dependency_type,
     });
   }
 
+  const overlapWarnings = advisoryOverlapWarnings(assignments);
   const validated: ValidatedPlanAssignment[] = [];
   for (const assignment of assignments) {
     const dependencies: ValidatedPlanAssignment['dependencies'] = [];
@@ -2482,12 +2546,49 @@ function validateLeaderPlan(raw: Record<string, unknown>, members: TeamWithMembe
     }
     validated.push({
       ...assignment,
+      overlap_warnings: overlapWarnings.get(assignment.id) ?? [],
       delivery_id: deliveryIdByAssignmentId.get(assignment.id)!,
       dependencies,
     });
   }
 
   return { type: 'plan', summary, assignments: validated };
+}
+
+function parseExpectedFiles(value: unknown, assignmentId: string): { value: string[] } | { error: string } {
+  if (value === undefined) return { value: [] };
+  if (!Array.isArray(value)) return { error: `assignment ${assignmentId} expected_files must be an array of strings` };
+  const files: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') return { error: `assignment ${assignmentId} expected_files must be an array of strings` };
+    const file = item.trim();
+    if (file) files.push(file);
+  }
+  return { value: [...new Set(files)] };
+}
+
+function advisoryOverlapWarnings(
+  assignments: Array<{ id: string; expected_files: string[] }>,
+): Map<string, string[]> {
+  const assignmentIdsByFile = new Map<string, string[]>();
+  for (const assignment of assignments) {
+    for (const file of assignment.expected_files) {
+      const normalized = file.replaceAll('\\', '/');
+      assignmentIdsByFile.set(normalized, [...(assignmentIdsByFile.get(normalized) ?? []), assignment.id]);
+    }
+  }
+
+  const warnings = new Map<string, string[]>();
+  for (const [file, assignmentIds] of assignmentIdsByFile) {
+    if (assignmentIds.length < 2) continue;
+    for (const assignmentId of assignmentIds) {
+      warnings.set(assignmentId, [
+        ...(warnings.get(assignmentId) ?? []),
+        `${file} also appears in ${assignmentIds.filter((id) => id !== assignmentId).join(', ')}`,
+      ]);
+    }
+  }
+  return warnings;
 }
 
 function assignmentContent(assignment: ValidatedPlanAssignment): string {
@@ -2497,6 +2598,8 @@ function assignmentContent(assignment: ValidatedPlanAssignment): string {
     `Task: ${assignment.task}`,
     assignment.task_type ? `Task type: ${assignment.task_type}` : '',
     `Requires file write: ${assignment.requires_file_write ? 'yes' : 'no'}`,
+    assignment.expected_files.length > 0 ? `Expected files: ${assignment.expected_files.join(', ')}` : '',
+    assignment.overlap_warnings.length > 0 ? `Overlap warning: ${assignment.overlap_warnings.join('; ')}` : '',
     assignment.context ? `Context: ${assignment.context}` : '',
     assignment.depends_on.length > 0 ? `Depends on: ${assignment.depends_on.join(', ')}` : 'Depends on: none',
   ]
@@ -2545,6 +2648,8 @@ function deliveryPrompt({
     'Workspace:',
     `- File access: ${member.file_access}`,
     `- Execution cwd: ${member.execution_cwd}`,
+    member.worktree_branch ? `- Worktree branch: ${member.worktree_branch}` : '',
+    member.worktree_path ? `- Worktree path: ${member.worktree_path}` : '',
     '- Only operate inside the execution cwd.',
     '',
     'Task:',
@@ -2556,8 +2661,11 @@ function deliveryPrompt({
     'Expected output:',
     '- Complete the assigned task in this existing team session.',
     '- Report one concise outbound message for the leader.',
+    member.file_access === 'read_write'
+      ? '- In RESULT, include branch name when present, touched files when available, and test results or verification status.'
+      : '',
     '- Start with exactly one of: RESULT:, REVIEW:, NEED_INFO:, PROPOSAL:, FAILED:, or MESSAGE_TO role:.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function compactForPrompt(value: string): string {

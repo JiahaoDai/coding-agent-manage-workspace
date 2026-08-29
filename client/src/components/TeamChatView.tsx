@@ -153,6 +153,7 @@ export function TeamChatView({
           </span>
         </nav>
         <div className="team-chat-header-actions">
+          <span className="team-status">parallel {team.max_parallel_members}</span>
           <button
             type="button"
             className="btn btn-secondary team-export-btn"

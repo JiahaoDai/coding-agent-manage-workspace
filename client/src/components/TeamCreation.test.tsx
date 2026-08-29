@@ -61,6 +61,7 @@ describe('team creation UI', () => {
     expect(markup).toContain('Select an agent');
     expect(markup).toContain('Select a directory first');
     expect(markup).toContain('Use git worktree isolation for read/write members');
+    expect(markup).toContain('Max parallel members');
     expect(markup).toContain('File access');
     expect(markup).toContain('Role prompt');
   });
@@ -69,6 +70,7 @@ describe('team creation UI', () => {
     const markup = renderToStaticMarkup(<TeamOverview team={team} />);
 
     expect(markup).toContain('Product Builder');
+    expect(markup).toContain('parallel 1');
     expect(markup).toContain('/project');
     expect(markup).toContain('leader');
     expect(markup).toContain('fake · default model');

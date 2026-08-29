@@ -17,7 +17,10 @@ export function TeamOverview({
             {team.cwd}
           </p>
         </div>
-        <span className="team-status">{team.status}</span>
+        <div className="team-overview-statuses">
+          <span className="team-status">parallel {team.max_parallel_members}</span>
+          <span className="team-status">{team.status}</span>
+        </div>
       </div>
 
       {deleteError && (

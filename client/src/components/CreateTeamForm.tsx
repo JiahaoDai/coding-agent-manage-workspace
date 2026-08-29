@@ -38,6 +38,7 @@ export function CreateTeamForm({
   const [name, setName] = useState('');
   const [cwd, setCwd] = useState('');
   const [worktreeIsolation, setWorktreeIsolation] = useState(false);
+  const [maxParallelMembers, setMaxParallelMembers] = useState(1);
   const [members, setMembers] = useState<TeamMemberInput[]>([defaultMember('leader')]);
   const [fsRoot, setFsRoot] = useState<{ root: string; name: string } | null>(null);
   const [fsError, setFsError] = useState<string | null>(null);
@@ -112,6 +113,7 @@ export function CreateTeamForm({
         name: name.trim(),
         cwd: cwd.trim(),
         worktree_isolation: worktreeIsolation,
+        max_parallel_members: maxParallelMembers,
         members: members.map((member) => ({
           ...member,
           role: member.role.trim(),
@@ -173,6 +175,18 @@ export function CreateTeamForm({
           onChange={(event) => setWorktreeIsolation(event.target.checked)}
         />
         <span>Use git worktree isolation for read/write members</span>
+      </label>
+
+      <label className="field">
+        <span className="field-label">Max parallel members</span>
+        <input
+          type="number"
+          min={1}
+          max={8}
+          step={1}
+          value={maxParallelMembers}
+          onChange={(event) => setMaxParallelMembers(clampParallelMembers(event.target.valueAsNumber))}
+        />
       </label>
 
       <fieldset className="team-members-field">
@@ -275,6 +289,11 @@ export function CreateTeamForm({
       </div>
     </form>
   );
+}
+
+function clampParallelMembers(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(8, Math.max(1, Math.trunc(value)));
 }
 
 function modelLookupKey(cwd: string, agent: string): string {

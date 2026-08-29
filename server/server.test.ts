@@ -290,6 +290,35 @@ describe('walking skeleton', () => {
     }
   });
 
+  it('migrates existing team tables with max_parallel_members defaulting to one', () => {
+    const db = new Database(':memory:');
+    try {
+      db.exec(`
+        CREATE TABLE team (
+          team_id     TEXT PRIMARY KEY,
+          name        TEXT NOT NULL,
+          cwd         TEXT NOT NULL,
+          status      TEXT NOT NULL,
+          create_time INTEGER NOT NULL,
+          modify_time INTEGER NOT NULL
+        );
+        INSERT INTO team
+          (team_id, name, cwd, status, create_time, modify_time)
+        VALUES
+          ('team-old', 'Old team', '/tmp/project', 'idle', 1, 1);
+      `);
+
+      new SessionStore(db);
+
+      const migrated = db.prepare(`SELECT max_parallel_members FROM team WHERE team_id = ?`).get('team-old') as {
+        max_parallel_members: number;
+      };
+      expect(migrated.max_parallel_members).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
   it('persists team runs across a restart as collaboration metadata without native transcript bodies', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dash-team-history-'));
     const dbPath = join(dir, 'sessions.db');
@@ -682,6 +711,75 @@ describe('agent teams (v3 ticket #1)', () => {
       server.close();
       db.close();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects parallel read-write teams that do not enable worktree isolation', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'Unsafe Parallel Team',
+        cwd: '/tmp/team-project',
+        max_parallel_members: 2,
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Plan work.',
+            file_access: 'read_write',
+          },
+          {
+            role: 'backend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Implement backend work.',
+            file_access: 'read_write',
+          },
+        ],
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: string };
+      expect(body.error).toBe('max_parallel_members above 1 with read_write members requires worktree_isolation');
+      expect(fake.created).toEqual([]);
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('persists max_parallel_members for teams that can run safely in parallel', async () => {
+    const { db, server, baseUrl } = await startServer();
+    try {
+      const res = await post(baseUrl, '/api/teams', {
+        name: 'Readonly Parallel Team',
+        cwd: '/tmp/team-project',
+        max_parallel_members: 3,
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Plan readonly work.',
+            file_access: 'read_only',
+          },
+          {
+            role: 'reviewer',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Review work.',
+            file_access: 'read_only',
+          },
+        ],
+      });
+
+      expect(res.status).toBe(201);
+      const team = await res.json() as { max_parallel_members: number };
+      expect(team.max_parallel_members).toBe(3);
+    } finally {
+      server.close();
+      db.close();
     }
   });
 
@@ -1216,6 +1314,53 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
     return await createdTeam.json() as { team_id: string; members: Array<{ member_id: string; role: string }> };
   }
 
+  async function createReadonlyParallelTeam(
+    baseUrl: string,
+    max_parallel_members = 2,
+  ): Promise<{ team_id: string; max_parallel_members: number; members: Array<{ member_id: string; role: string }> }> {
+    const createdTeam = await post(baseUrl, '/api/teams', {
+      name: 'Readonly Parallel Team',
+      cwd: '/tmp/team-project',
+      max_parallel_members,
+      members: [
+        {
+          role: 'leader',
+          agent: 'fake',
+          model: null,
+          responsibility_prompt: 'Plan work for the team.',
+          file_access: 'read_only',
+        },
+        {
+          role: 'reviewer',
+          agent: 'fake',
+          model: null,
+          responsibility_prompt: 'Review completed work.',
+          file_access: 'read_only',
+        },
+        {
+          role: 'tester',
+          agent: 'fake',
+          model: null,
+          responsibility_prompt: 'Verify completed work.',
+          file_access: 'read_only',
+        },
+        {
+          role: 'researcher',
+          agent: 'fake',
+          model: null,
+          responsibility_prompt: 'Inspect project context.',
+          file_access: 'read_only',
+        },
+      ],
+    });
+    expect(createdTeam.status).toBe(201);
+    return await createdTeam.json() as {
+      team_id: string;
+      max_parallel_members: number;
+      members: Array<{ member_id: string; role: string }>;
+    };
+  }
+
   it('turns a valid leader plan into assignment messages, queued deliveries, and dependencies', async () => {
     const { db, fake, server, baseUrl } = await startServer();
     try {
@@ -1472,6 +1617,370 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
 
       const backend = team.members.find((member) => member.role === 'backend-coder')!;
       expect(runs[0].deliveries.filter((delivery) => delivery.to_member_id === backend.member_id).map((delivery) => delivery.enqueue_seq)).toEqual([1, 2]);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('runs different members concurrently up to max_parallel_members', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      let activeWorkers = 0;
+      let maxActiveWorkers = 0;
+      const workerStarts: string[] = [];
+
+      fake.promptScript = async (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Run three independent readonly tasks.',
+            assignments: [
+              { id: 'review', to: 'reviewer', task_type: 'review', requires_file_write: false, task: 'Review the API.', context: '', depends_on: [] },
+              { id: 'test', to: 'tester', task_type: 'review', requires_file_write: false, task: 'Verify the API.', context: '', depends_on: [] },
+              { id: 'research', to: 'researcher', task_type: 'analysis', requires_file_write: false, task: 'Inspect the API context.', context: '', depends_on: [] },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          const role = ctx.input.includes('Review the API.')
+            ? 'reviewer'
+            : ctx.input.includes('Verify the API.')
+              ? 'tester'
+              : 'researcher';
+          workerStarts.push(role);
+          activeWorkers += 1;
+          maxActiveWorkers = Math.max(maxActiveWorkers, activeWorkers);
+          await sleep(80);
+          handlers.onTextDelta(`REVIEW: ${role} complete.`);
+          activeWorkers -= 1;
+        } else if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Parallel workers completed.',
+            result: 'Leader finished after parallel readonly work.',
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createReadonlyParallelTeam(baseUrl, 2);
+      expect(team.max_parallel_members).toBe(2);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Run readonly work in parallel.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      await collectEvents(reader, (evs) => evs.some((event) => event.type === 'team_run_completed'));
+      expect(maxActiveWorkers).toBe(2);
+      expect(fake.maxConcurrentPrompts).toBe(2);
+      expect(workerStarts).toEqual(['reviewer', 'tester', 'researcher']);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('keeps the same member serialized even when team parallelism has capacity', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const activeByRole = new Map<string, number>();
+      let sameMemberOverlap = false;
+      let maxActiveWorkers = 0;
+
+      fake.promptScript = async (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Queue two reviewer tasks and one tester task.',
+            assignments: [
+              { id: 'review-a', to: 'reviewer', task_type: 'review', requires_file_write: false, task: 'Review A.', context: '', depends_on: [] },
+              { id: 'review-b', to: 'reviewer', task_type: 'review', requires_file_write: false, task: 'Review B.', context: '', depends_on: [] },
+              { id: 'test-a', to: 'tester', task_type: 'review', requires_file_write: false, task: 'Test A.', context: '', depends_on: [] },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          const role = ctx.input.includes('Test A.') ? 'tester' : 'reviewer';
+          activeByRole.set(role, (activeByRole.get(role) ?? 0) + 1);
+          sameMemberOverlap ||= (activeByRole.get(role) ?? 0) > 1;
+          maxActiveWorkers = Math.max(maxActiveWorkers, [...activeByRole.values()].reduce((sum, value) => sum + value, 0));
+          await sleep(80);
+          handlers.onTextDelta(`REVIEW: ${role} complete.`);
+          activeByRole.set(role, (activeByRole.get(role) ?? 1) - 1);
+        } else if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Member serialization held.',
+            result: 'Leader finished after serialized member work.',
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createReadonlyParallelTeam(baseUrl, 2);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Run serialized same-member work.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      await collectEvents(reader, (evs) => evs.some((event) => event.type === 'team_run_completed'));
+      expect(maxActiveWorkers).toBe(2);
+      expect(sameMemberOverlap).toBe(false);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('keeps dependency-gated deliveries blocked until upstream work finishes under parallel scheduling', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      const started: string[] = [];
+
+      fake.promptScript = async (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Verify after review.',
+            assignments: [
+              { id: 'review', to: 'reviewer', task_type: 'review', requires_file_write: false, task: 'Review first.', context: '', depends_on: [] },
+              { id: 'verify', to: 'tester', task_type: 'review', requires_file_write: false, task: 'Verify after review.', context: '', depends_on: ['review'], dependency_type: 'success' },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          const task = ctx.input.split('\nTask:\n')[1]?.split('\nDependency summaries:')[0] ?? '';
+          const role = task.includes('Assignment review -> reviewer') ? 'reviewer' : 'tester';
+          started.push(role);
+          await sleep(50);
+          handlers.onTextDelta(`REVIEW: ${role} complete.`);
+        } else if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Dependency order held.',
+            result: 'Leader finished after dependency-gated work.',
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createReadonlyParallelTeam(baseUrl, 2);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Run dependency-gated work.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      await collectEvents(reader, (evs) => evs.some((event) => event.type === 'team_run_completed'));
+      expect(started).toEqual(['reviewer', 'tester']);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+    }
+  });
+
+  it('runs read-write members concurrently when their sessions are isolated in worktrees', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-parallel-worktree-'));
+    const repo = createCommittedGitRepo(dir);
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      let activeWorkers = 0;
+      let maxActiveWorkers = 0;
+      const workerCwds: string[] = [];
+
+      fake.promptScript = async (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Run two isolated implementations.',
+            assignments: [
+              {
+                id: 'backend',
+                to: 'backend-coder',
+                task_type: 'implementation',
+                requires_file_write: true,
+                expected_files: ['server/api.ts'],
+                task: 'Implement backend API.',
+                context: '',
+                depends_on: [],
+              },
+              {
+                id: 'frontend',
+                to: 'frontend-coder',
+                task_type: 'implementation',
+                requires_file_write: true,
+                expected_files: ['client/app.tsx'],
+                task: 'Implement frontend UI.',
+                context: '',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          workerCwds.push(ctx.cwd);
+          expect(ctx.input).toContain('Worktree branch: agent-team/');
+          expect(ctx.input).toContain('touched files');
+          handlers.onToolCallStart('edit-1', 'Edit', { file_path: `${ctx.cwd}/src/file.ts` });
+          handlers.onToolCallEnd('edit-1');
+          activeWorkers += 1;
+          maxActiveWorkers = Math.max(maxActiveWorkers, activeWorkers);
+          await sleep(80);
+          handlers.onTextDelta('RESULT: Branch updated. Touched files: one file. Tests: not run.');
+          activeWorkers -= 1;
+        } else if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Isolated workers completed.',
+            result: 'Leader finished after isolated parallel write work.',
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const createdTeam = await post(baseUrl, '/api/teams', {
+        name: 'Parallel Write Team',
+        cwd: repo,
+        worktree_isolation: true,
+        max_parallel_members: 2,
+        members: [
+          {
+            role: 'leader',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Plan write work.',
+            file_access: 'read_only',
+          },
+          {
+            role: 'backend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Implement backend work.',
+            file_access: 'read_write',
+          },
+          {
+            role: 'frontend-coder',
+            agent: 'fake',
+            model: null,
+            responsibility_prompt: 'Implement frontend work.',
+            file_access: 'read_write',
+          },
+        ],
+      });
+      expect(createdTeam.status).toBe(201);
+      const team = await createdTeam.json() as {
+        team_id: string;
+        members: Array<{ role: string; execution_cwd: string; worktree_path: string | null; worktree_branch: string | null }>;
+      };
+      const backend = team.members.find((member) => member.role === 'backend-coder')!;
+      const frontend = team.members.find((member) => member.role === 'frontend-coder')!;
+      expect(backend.worktree_path).toBe(backend.execution_cwd);
+      expect(frontend.worktree_path).toBe(frontend.execution_cwd);
+
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Run isolated write work in parallel.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(reader, (evs) => evs.some((event) => event.type === 'team_run_completed'));
+      expect(maxActiveWorkers).toBe(2);
+      expect(workerCwds.sort()).toEqual([backend.execution_cwd, frontend.execution_cwd].sort());
+      expect(events.some(
+        (event) =>
+          event.type === 'team_text_delta' &&
+          event.stream_kind === 'tool' &&
+          event.text.includes('Touched-file hints:'),
+      )).toBe(true);
+
+      await reader.cancel();
+    } finally {
+      server.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('adds advisory overlap warnings for expected files without blocking the plan', async () => {
+    const { db, fake, server, baseUrl } = await startServer();
+    try {
+      fake.promptScript = (handlers, ctx) => {
+        if (ctx.input.includes('User request:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'plan',
+            summary: 'Plan two edits that may touch the same file.',
+            assignments: [
+              {
+                id: 'api-route',
+                to: 'backend-coder',
+                task_type: 'implementation',
+                requires_file_write: true,
+                expected_files: ['server/api.ts'],
+                task: 'Implement the API route.',
+                context: '',
+                depends_on: [],
+              },
+              {
+                id: 'api-tests',
+                to: 'backend-coder',
+                task_type: 'implementation',
+                requires_file_write: true,
+                expected_files: ['server/api.ts', 'server/api.test.ts'],
+                task: 'Implement API tests.',
+                context: '',
+                depends_on: [],
+              },
+            ],
+          }));
+        } else if (ctx.input.includes('New delivery:')) {
+          handlers.onTextDelta('RESULT: assignment done.');
+        } else if (ctx.input.includes('New inbound team message:')) {
+          handlers.onTextDelta(JSON.stringify({
+            type: 'final',
+            summary: 'Overlap warning was advisory.',
+            result: 'Leader finished despite advisory overlap warnings.',
+          }));
+        }
+        handlers.onStatusChange('completed');
+      };
+
+      const team = await createPlanningTeam(baseUrl);
+      const sseRes = await fetch(`${baseUrl}/api/events`);
+      const reader = sseRes.body!.getReader();
+      await sleep(30);
+
+      const runResponse = await post(baseUrl, `/api/teams/${team.team_id}/runs`, {
+        text: 'Plan overlapping backend work.',
+      });
+      expect(runResponse.status).toBe(202);
+
+      const events = await collectEvents(reader, (evs) => evs.some((event) => event.type === 'team_run_completed'));
+      const plan = events.find(
+        (event): event is Extract<ServerEvent, { type: 'team_plan_created' }> => event.type === 'team_plan_created',
+      )!;
+      expect(plan.assignment_messages).toHaveLength(2);
+      expect(plan.assignment_messages[0].content).toContain('Expected files: server/api.ts');
+      expect(plan.assignment_messages[0].content).toContain('Overlap warning: server/api.ts also appears in api-tests');
+      expect(plan.assignment_messages[1].content).toContain('Overlap warning: server/api.ts also appears in api-route');
 
       await reader.cancel();
     } finally {

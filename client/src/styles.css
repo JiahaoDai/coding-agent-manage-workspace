@@ -1149,6 +1149,13 @@ button {
   overflow-wrap: anywhere;
 }
 
+.team-overview-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .team-status {
   align-self: flex-start;
   padding: 4px 8px;

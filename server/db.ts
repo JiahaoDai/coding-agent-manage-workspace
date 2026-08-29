@@ -163,6 +163,10 @@ export class SessionStore {
     if (!columns.some((column) => column.name === 'model')) {
       db.exec(`ALTER TABLE session ADD COLUMN model TEXT`);
     }
+    const teamColumns = db.prepare(`PRAGMA table_info(team)`).all() as Array<{ name: string }>;
+    if (!teamColumns.some((column) => column.name === 'max_parallel_members')) {
+      db.exec(`ALTER TABLE team ADD COLUMN max_parallel_members INTEGER NOT NULL DEFAULT 1`);
+    }
     const deliveryColumns = db.prepare(`PRAGMA table_info(team_message_delivery)`).all() as Array<{ name: string }>;
     if (!deliveryColumns.some((column) => column.name === 'max_attempts')) {
       db.exec(`ALTER TABLE team_message_delivery ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3`);
@@ -631,7 +635,7 @@ export class SessionStore {
     return release();
   }
 
-  claimNextRunnableTeamDelivery(run_id: string): {
+  claimNextRunnableTeamDelivery(run_id: string, options?: { includeLeader?: boolean; maxRunning?: number }): {
     delivery: TeamMessageDeliveryRecord;
     attempt: TeamDeliveryAttemptRecord;
     message: TeamMessageRecord;
@@ -639,7 +643,7 @@ export class SessionStore {
   } | undefined;
   claimNextRunnableTeamDelivery(
     run_id: string,
-    options: { includeLeader: false },
+    options: { includeLeader: false; maxRunning?: number },
   ): {
     delivery: TeamMessageDeliveryRecord;
     attempt: TeamDeliveryAttemptRecord;
@@ -648,7 +652,7 @@ export class SessionStore {
   } | undefined;
   claimNextRunnableTeamDelivery(
     run_id: string,
-    options: { includeLeader: boolean } = { includeLeader: true },
+    options: { includeLeader?: boolean; maxRunning?: number } = { includeLeader: true, maxRunning: 1 },
   ): {
     delivery: TeamMessageDeliveryRecord;
     attempt: TeamDeliveryAttemptRecord;
@@ -656,15 +660,15 @@ export class SessionStore {
     member: TeamMemberRecord;
   } | undefined {
     const claim = this.db.transaction(() => {
+      const maxRunning = Math.max(1, Math.floor(options.maxRunning ?? 1));
       const running = this.db
         .prepare(
-          `SELECT 1
+          `SELECT COUNT(*) AS count
            FROM team_message_delivery
-           WHERE run_id = ? AND status = 'running'
-           LIMIT 1`,
+           WHERE run_id = ? AND status = 'running'`,
         )
-        .get(run_id);
-      if (running) return undefined;
+        .get(run_id) as { count: number };
+      if (running.count >= maxRunning) return undefined;
 
       const row = this.db
         .prepare(
@@ -692,7 +696,7 @@ export class SessionStore {
            ORDER BY delivery.created_at ASC, delivery.enqueue_seq ASC, delivery.delivery_id ASC
            LIMIT 1`,
         )
-        .get(run_id, Date.now(), options.includeLeader ? 1 : 0) as TeamDeliveryRow | undefined;
+        .get(run_id, Date.now(), options.includeLeader !== false ? 1 : 0) as TeamDeliveryRow | undefined;
       if (!row) return undefined;
 
       const now = Date.now();
