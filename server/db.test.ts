@@ -118,6 +118,35 @@ describe('SessionStore latest-error persistence', () => {
 });
 
 describe('SessionStore agent team persistence', () => {
+  it('adds the reply-to delivery column to legacy team messages', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dash-team-message-migration-'));
+    temporaryDirs.push(dir);
+    const path = join(dir, 'sessions.db');
+    const legacy = new Database(path);
+    legacy.exec(`
+      CREATE TABLE team_message (
+        message_id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        from_member_id TEXT,
+        from_kind TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        content TEXT NOT NULL,
+        create_time INTEGER NOT NULL
+      );
+    `);
+    legacy.close();
+
+    const db = new Database(path);
+    try {
+      new SessionStore(db);
+      const columns = db.prepare(`PRAGMA table_info(team_message)`).all() as Array<{ name: string }>;
+      expect(columns.some((column) => column.name === 'in_reply_to_delivery_id')).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
   it('migrates legacy team members with read-write compatibility defaults and execution cwd', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dash-team-db-migration-'));
     temporaryDirs.push(dir);

@@ -794,6 +794,7 @@ async function runLeaderOnlyDelivery({
       message_id: randomUUID(),
       team_id,
       run_id: run.run_id,
+      in_reply_to_delivery_id: delivery_id,
       from_member_id: leader.member_id,
       from_kind: 'member',
       kind: 'final',
@@ -827,6 +828,7 @@ async function runLeaderOnlyDelivery({
       message_id: randomUUID(),
       team_id,
       run_id: run.run_id,
+      in_reply_to_delivery_id: delivery_id,
       from_member_id: leader.member_id,
       from_kind: 'system',
       kind: 'error',
@@ -1046,6 +1048,7 @@ function finishLeaderInboxBatch({
       message_id: randomUUID(),
       team_id: batch[0].delivery.team_id,
       run_id: batch[0].delivery.run_id,
+      in_reply_to_delivery_id: primary_delivery_id,
       from_member_id: leader.member_id,
       from_kind: 'system',
       kind: 'status',
@@ -1101,6 +1104,7 @@ async function runClaimedLeaderFollowUpDelivery({
       message_id: randomUUID(),
       team_id: delivery.team_id,
       run_id: delivery.run_id,
+      in_reply_to_delivery_id: delivery.delivery_id,
       from_member_id: leader.member_id,
       from_kind: 'system',
       kind: 'error',
@@ -1340,6 +1344,7 @@ async function runClaimedLeaderFollowUpDelivery({
       message_id: randomUUID(),
       team_id: delivery.team_id,
       run_id: delivery.run_id,
+      in_reply_to_delivery_id: delivery.delivery_id,
       from_member_id: leader.member_id,
       from_kind: 'member',
       kind: 'final',
@@ -1650,6 +1655,7 @@ function routeMemberOutboundToLeader({
     leader_member_id: leader.member_id,
     message_id: randomUUID(),
     delivery_id: randomUUID(),
+    in_reply_to_delivery_id: delivery.delivery_id,
     kind: outbound.kind,
     content: outbound.content,
     now: Date.now(),
@@ -2687,15 +2693,26 @@ function deliveryPrompt({
   runItems: TeamRunWithItems | undefined;
   team_cwd: string;
 }): string {
+  const dependencyResultBudget = Math.max(
+    400,
+    Math.min(4_000, Math.floor(12_000 / Math.max(1, dependencies.length))),
+  );
   const dependencyLines = dependencies.map((dependency) => {
     const upstream = runItems?.deliveries.find((item) => item.delivery_id === dependency.depends_on_delivery_id);
-    const upstreamMessage = upstream
-      ? runItems?.messages.find((item) => item.message_id === upstream.message_id)
+    const upstreamResult = upstream
+      ? runItems?.messages
+        .filter((item) => (
+          item.in_reply_to_delivery_id === upstream.delivery_id
+          && item.from_member_id === upstream.to_member_id
+          && ['result', 'review', 'need_info', 'proposal', 'error'].includes(item.kind)
+        ))
+        .sort((left, right) => right.create_time - left.create_time)[0]
       : undefined;
     return [
       `- ${dependency.depends_on_delivery_id}: requires ${dependency.dependency_type}, status=${upstream?.status ?? 'unknown'}`,
       upstream?.error ? `  Error: ${upstream.error}` : '',
-      upstreamMessage ? `  Summary: ${compactForPrompt(upstreamMessage.content)}` : '',
+      upstreamResult ? `  ${upstreamResult.kind}: ${compactForPromptWithBudget(upstreamResult.content, dependencyResultBudget)}` : '',
+      upstream && !upstreamResult ? '  Result: unavailable.' : '',
     ]
       .filter(Boolean)
       .join('\n');
@@ -2718,7 +2735,7 @@ function deliveryPrompt({
     'Task:',
     message.content,
     '',
-    'Dependency summaries:',
+    'Dependency results:',
     dependencyLines.length > 0 ? dependencyLines.join('\n') : '- none',
     '',
     'Expected output:',

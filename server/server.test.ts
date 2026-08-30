@@ -1686,7 +1686,10 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
             ],
           }));
         } else if (ctx.input.includes('New delivery:')) {
-          handlers.onTextDelta(`worked:${ctx.input.match(/Task:\n([\s\S]*?)\n\nDependency summaries:/)?.[1] ?? 'unknown'}`);
+          const task = ctx.input.match(/Task:\n([\s\S]*?)\nDependency results:/)?.[1] ?? 'unknown';
+          handlers.onTextDelta(task.includes('Assignment api -> backend-coder')
+            ? 'RESULT: API implementation result: endpoint and validation are ready.'
+            : `worked:${task}`);
           await sleep(60);
         } else if (ctx.input.includes('New inbound team message:')) {
           handlers.onTextDelta(JSON.stringify({
@@ -1739,8 +1742,10 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
       expect(workerPrompts[0]).toContain('Task: Implement the API endpoint.');
       expect(workerPrompts[1]).toContain('Task: Add route tests.');
       expect(workerPrompts[2]).toContain('Task: Review the API implementation.');
-      expect(workerPrompts[2]).toContain('Dependency summaries:');
+      expect(workerPrompts[2]).toContain('Dependency results:');
       expect(workerPrompts[2]).toContain('requires success, status=done');
+      expect(workerPrompts[2]).toContain('result: API implementation result: endpoint and validation are ready.');
+      expect(workerPrompts[2]).not.toContain('Summary: Assignment api -> backend-coder');
       expect(workerPrompts[0]).toContain('Member initialization (first delivery only):');
       expect(workerPrompts[0]).toContain('You are backend-coder in an agent team.');
       expect(workerPrompts[0]).toContain('Implement backend tasks.');
@@ -1760,9 +1765,17 @@ describe('agent team leader plan parsing (v3 ticket #4)', () => {
 
       const runs = await (await fetch(`${baseUrl}/api/teams/${team.team_id}/runs`)).json() as Array<{
         run: { status: string };
-        deliveries: Array<{ status: string; to_member_id: string; enqueue_seq: number }>;
+        messages: Array<{ content: string; in_reply_to_delivery_id: string | null }>;
+        deliveries: Array<{ delivery_id: string; status: string; to_member_id: string; enqueue_seq: number }>;
       }>;
       expect(runs[0].run.status).toBe('completed');
+      const apiDelivery = runs[0].deliveries.find((delivery) => (
+        delivery.to_member_id === team.members.find((member) => member.role === 'backend-coder')!.member_id
+        && delivery.enqueue_seq === 1
+      ))!;
+      expect(runs[0].messages.find((message) => (
+        message.content === 'API implementation result: endpoint and validation are ready.'
+      ))).toMatchObject({ in_reply_to_delivery_id: apiDelivery.delivery_id });
       expect(runs[0].deliveries.map((delivery) => delivery.status)).toEqual([
         'done',
         'done',

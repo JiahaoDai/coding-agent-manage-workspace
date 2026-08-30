@@ -172,6 +172,7 @@ function message(
     message_id,
     team_id: 'team-1',
     run_id: 'run-123456',
+    in_reply_to_delivery_id: null,
     from_member_id,
     from_kind,
     kind,

@@ -95,14 +95,15 @@ export class SessionStore {
         ON team_run (team_id, create_time);
 
       CREATE TABLE IF NOT EXISTS team_message (
-        message_id     TEXT PRIMARY KEY,
-        team_id        TEXT NOT NULL,
-        run_id         TEXT NOT NULL,
-        from_member_id TEXT,
-        from_kind      TEXT NOT NULL,
-        kind           TEXT NOT NULL,
-        content        TEXT NOT NULL,
-        create_time    INTEGER NOT NULL
+        message_id              TEXT PRIMARY KEY,
+        team_id                 TEXT NOT NULL,
+        run_id                  TEXT NOT NULL,
+        in_reply_to_delivery_id TEXT,
+        from_member_id          TEXT,
+        from_kind               TEXT NOT NULL,
+        kind                    TEXT NOT NULL,
+        content                 TEXT NOT NULL,
+        create_time             INTEGER NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_team_message_run
@@ -166,6 +167,10 @@ export class SessionStore {
     const teamColumns = db.prepare(`PRAGMA table_info(team)`).all() as Array<{ name: string }>;
     if (!teamColumns.some((column) => column.name === 'max_parallel_members')) {
       db.exec(`ALTER TABLE team ADD COLUMN max_parallel_members INTEGER NOT NULL DEFAULT 1`);
+    }
+    const teamMessageColumns = db.prepare(`PRAGMA table_info(team_message)`).all() as Array<{ name: string }>;
+    if (!teamMessageColumns.some((column) => column.name === 'in_reply_to_delivery_id')) {
+      db.exec(`ALTER TABLE team_message ADD COLUMN in_reply_to_delivery_id TEXT`);
     }
     const deliveryColumns = db.prepare(`PRAGMA table_info(team_message_delivery)`).all() as Array<{ name: string }>;
     if (!deliveryColumns.some((column) => column.name === 'max_attempts')) {
@@ -423,6 +428,7 @@ export class SessionStore {
         message_id: input.user_message_id,
         team_id: input.team_id,
         run_id: input.run_id,
+        in_reply_to_delivery_id: null,
         from_member_id: null,
         from_kind: 'user',
         kind: 'user_request',
@@ -752,7 +758,8 @@ export class SessionStore {
                 delivery.to_member_id, delivery.status, delivery.enqueue_seq, delivery.created_at,
                 delivery.started_at, delivery.finished_at, delivery.error, delivery.max_attempts, delivery.retry_after,
                 message.message_id AS msg_message_id, message.team_id AS msg_team_id,
-                message.run_id AS msg_run_id, message.from_member_id AS msg_from_member_id,
+                message.run_id AS msg_run_id, message.in_reply_to_delivery_id AS msg_in_reply_to_delivery_id,
+                message.from_member_id AS msg_from_member_id,
                 message.from_kind AS msg_from_kind, message.kind AS msg_kind,
                 message.content AS msg_content, message.create_time AS msg_create_time
          FROM team_message_delivery delivery
@@ -773,6 +780,7 @@ export class SessionStore {
         msg_message_id: string;
         msg_team_id: string;
         msg_run_id: string;
+        msg_in_reply_to_delivery_id: string | null;
         msg_from_member_id: string | null;
         msg_from_kind: TeamMessageRecord['from_kind'];
         msg_kind: TeamMessageRecord['kind'];
@@ -787,6 +795,7 @@ export class SessionStore {
         message_id: row.msg_message_id,
         team_id: row.msg_team_id,
         run_id: row.msg_run_id,
+        in_reply_to_delivery_id: row.msg_in_reply_to_delivery_id,
         from_member_id: row.msg_from_member_id,
         from_kind: row.msg_from_kind,
         kind: row.msg_kind,
@@ -832,7 +841,7 @@ export class SessionStore {
   getTeamMessage(message_id: string): TeamMessageRecord | undefined {
     const row = this.db
       .prepare(
-        `SELECT message_id, team_id, run_id, from_member_id, from_kind, kind, content, create_time
+        `SELECT message_id, team_id, run_id, in_reply_to_delivery_id, from_member_id, from_kind, kind, content, create_time
          FROM team_message WHERE message_id = ?`,
       )
       .get(message_id) as TeamMessageRow | undefined;
@@ -968,6 +977,7 @@ export class SessionStore {
         message_id: input.question_message_id,
         team_id: input.team_id,
         run_id: input.run_id,
+        in_reply_to_delivery_id: input.delivery_id,
         from_member_id: input.leader_member_id,
         from_kind: 'member',
         kind: 'need_info',
@@ -1023,6 +1033,7 @@ export class SessionStore {
         message_id: input.user_message_id,
         team_id: input.team_id,
         run_id: run.run_id,
+        in_reply_to_delivery_id: null,
         from_member_id: null,
         from_kind: 'user',
         kind: 'user_request',
@@ -1067,6 +1078,7 @@ export class SessionStore {
     leader_member_id: string;
     message_id: string;
     delivery_id: string;
+    in_reply_to_delivery_id: string;
     kind: TeamMessageRecord['kind'];
     content: string;
     now: number;
@@ -1076,6 +1088,7 @@ export class SessionStore {
         message_id: input.message_id,
         team_id: input.team_id,
         run_id: input.run_id,
+        in_reply_to_delivery_id: input.in_reply_to_delivery_id,
         from_member_id: input.from_member_id,
         from_kind: 'member',
         kind: input.kind,
@@ -1132,6 +1145,7 @@ export class SessionStore {
         message_id: input.plan_message_id,
         team_id: input.team_id,
         run_id: input.run_id,
+        in_reply_to_delivery_id: null,
         from_member_id: input.leader_member_id,
         from_kind: 'member',
         kind: 'status',
@@ -1148,6 +1162,7 @@ export class SessionStore {
           message_id: assignment.message_id,
           team_id: input.team_id,
           run_id: input.run_id,
+          in_reply_to_delivery_id: null,
           from_member_id: input.leader_member_id,
           from_kind: 'member',
           kind: 'assignment',
@@ -1225,9 +1240,9 @@ export class SessionStore {
     this.db
       .prepare(
         `INSERT INTO team_message
-           (message_id, team_id, run_id, from_member_id, from_kind, kind, content, create_time)
+           (message_id, team_id, run_id, in_reply_to_delivery_id, from_member_id, from_kind, kind, content, create_time)
          VALUES
-           (@message_id, @team_id, @run_id, @from_member_id, @from_kind, @kind, @content, @create_time)`,
+           (@message_id, @team_id, @run_id, @in_reply_to_delivery_id, @from_member_id, @from_kind, @kind, @content, @create_time)`,
       )
       .run(message);
   }
@@ -1307,7 +1322,7 @@ export class SessionStore {
   private listTeamMessages(run_id: string): TeamMessageRecord[] {
     const rows = this.db
       .prepare(
-        `SELECT message_id, team_id, run_id, from_member_id, from_kind, kind, content, create_time
+        `SELECT message_id, team_id, run_id, in_reply_to_delivery_id, from_member_id, from_kind, kind, content, create_time
          FROM team_message WHERE run_id = ? ORDER BY create_time ASC`,
       )
       .all(run_id) as TeamMessageRow[];
@@ -1415,6 +1430,7 @@ interface TeamMessageRow {
   message_id: string;
   team_id: string;
   run_id: string;
+  in_reply_to_delivery_id: string | null;
   from_member_id: string | null;
   from_kind: TeamMessageRecord['from_kind'];
   kind: TeamMessageRecord['kind'];

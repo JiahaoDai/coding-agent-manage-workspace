@@ -68,6 +68,8 @@ export interface TeamMessageRecord {
   message_id: string;
   team_id: string;
   run_id: string;
+  /** The inbound delivery that this member message completes, when applicable. */
+  in_reply_to_delivery_id: string | null;
   from_member_id: string | null;
   from_kind: TeamMessageFromKind;
   kind: TeamMessageKind;

@@ -1,6 +1,6 @@
 # Phase 1: Link Dependency Results Correctly
 
-> Status: proposed
+> Status: done
 > Priority: high
 > Goal: a downstream delivery receives the actual result of each dependency.
 
